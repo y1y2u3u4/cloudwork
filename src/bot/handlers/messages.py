@@ -53,9 +53,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = user.id
     chat_id = update.effective_chat.id
-    prompt = update.message.text.strip()
+
+    # 检查是否有 override_prompt（从技能命令传入）
+    override_prompt = context.user_data.pop('override_prompt', None)
+    prompt = override_prompt if override_prompt else update.message.text.strip()
 
     if not prompt:
+        return
+
+    # 检查是否有待处理的技能命令
+    pending_skill = context.user_data.get('pending_skill')
+    if pending_skill:
+        # 清除待处理状态
+        del context.user_data['pending_skill']
+        logger.info(f"技能快捷输入: {pending_skill} -> {prompt[:50]}...")
+        # 转发到命令处理器
+        from .commands import plan_command, ralph_command
+        # 设置命令参数（命令处理器使用 context.args 获取参数）
+        context.args = [prompt]
+        if pending_skill == 'plan':
+            await plan_command(update, context)
+        elif pending_skill == 'ralph':
+            await ralph_command(update, context)
         return
 
     logger.info(f"收到消息: user={user_id}, text={prompt[:50]}...")
@@ -77,12 +96,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         else:
             await update.message.reply_text(
-                "⏳ 有任务正在执行中，请等待完成或使用 /cancel 取消"
+                "⏳ 有任务正在执行中，请点击上方消息的「取消任务」按钮打断"
             )
             return
 
-    # 发送初始状态消息
-    status_message = await update.message.reply_text("🚀 正在启动 Claude...")
+    # 发送初始状态消息（带取消按钮）
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    cancel_button = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏹️ 取消任务", callback_data=f"cancel_task_{user_id}")]
+    ])
+    status_message = await update.message.reply_text(
+        "🚀 正在启动 Claude...",
+        reply_markup=cancel_button
+    )
 
     # 如果没有活跃会话，创建新会话
     if not session_id:
@@ -95,12 +122,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 记录消息到会话的映射
     message_session_map[status_message.message_id] = session_id
 
-    # 定义进度回调
+    # 定义进度回调（保持取消按钮）
     async def progress_callback(text: str, status: Optional[str]):
-        """更新进度消息"""
+        """更新进度消息，保持取消按钮"""
         try:
             progress_text = format_progress_text(text, status=status)
-            await safe_edit_message(status_message, progress_text, parse_mode=None)
+            await safe_edit_message(
+                status_message,
+                progress_text,
+                parse_mode=None,
+                reply_markup=cancel_button  # 保持取消按钮
+            )
         except Exception as e:
             logger.warning(f"更新进度消息失败: {e}")
 

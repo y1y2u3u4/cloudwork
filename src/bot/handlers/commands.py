@@ -502,6 +502,152 @@ async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================
+# 技能触发命令
+# =====================================
+
+async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """触发 planning-with-files 技能"""
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "📋 *Planning\\-with\\-Files 技能*\n\n"
+            "用法: `/plan <任务描述>`\n\n"
+            "功能:\n"
+            "• 创建结构化任务计划 \\(task\\_plan\\.md\\)\n"
+            "• 记录发现和中间结果 \\(findings\\.md\\)\n"
+            "• 追踪执行进度 \\(progress\\.md\\)\n\n"
+            "适用于复杂多步骤任务、研究项目、需要>5次工具调用的任务",
+            parse_mode='MarkdownV2'
+        )
+        return
+
+    prompt = " ".join(args)
+
+    # 构建技能触发 prompt
+    skill_prompt = f"/planning-with-files {prompt}"
+
+    # 通过消息处理流程执行
+    from .messages import handle_message
+
+    # 通过 context.user_data 传递 prompt（避免修改不可变的 Message 对象）
+    context.user_data['override_prompt'] = skill_prompt
+
+    await handle_message(update, context)
+
+
+async def ralph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """触发 ralph-loop 技能"""
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "🔄 *Ralph\\-Loop 技能*\n\n"
+            "用法: `/ralph <任务描述> [\\-\\-max N] [\\-\\-promise TEXT]`\n\n"
+            "参数:\n"
+            "• `\\-\\-max N`: 最大迭代次数 \\(默认 10\\)\n"
+            "• `\\-\\-promise TEXT`: 完成标记 \\(默认 RALPH\\_DONE\\)\n\n"
+            "功能:\n"
+            "• 自动迭代执行直到任务完成\n"
+            "• 每次迭代继承上次结果继续改进\n"
+            "• 适用于需要反复优化的复杂任务\n\n"
+            "取消: `/cancel`",
+            parse_mode='MarkdownV2'
+        )
+        return
+
+    # 解析参数
+    max_iterations = 10
+    completion_promise = "RALPH_DONE"
+    prompt_parts = []
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--max" and i + 1 < len(args):
+            try:
+                max_iterations = int(args[i + 1])
+                i += 2
+                continue
+            except ValueError:
+                pass
+        elif args[i] == "--promise" and i + 1 < len(args):
+            completion_promise = args[i + 1]
+            i += 2
+            continue
+        prompt_parts.append(args[i])
+        i += 1
+
+    prompt = " ".join(prompt_parts)
+
+    if not prompt:
+        await update.message.reply_text("❌ 请提供任务描述")
+        return
+
+    # 构建技能触发 prompt
+    skill_prompt = f'/ralph-loop "{prompt}" --completion-promise "{completion_promise}" --max-iterations {max_iterations}'
+
+    # 通过消息处理流程执行
+    from .messages import handle_message
+
+    # 通过 context.user_data 传递 prompt（避免修改不可变的 Message 对象）
+    context.user_data['override_prompt'] = skill_prompt
+
+    await handle_message(update, context)
+
+
+async def cancel_ralph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """取消 ralph-loop"""
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    # 触发取消命令
+    from .messages import handle_message
+    context.user_data['override_prompt'] = "/cancel-ralph"
+    await handle_message(update, context)
+
+
+async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示技能菜单 - 点击即用"""
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    # 两列布局：技能按钮 + 信息按钮
+    keyboard = [
+        [
+            InlineKeyboardButton("📋 Plan", callback_data="skill:plan:use"),
+            InlineKeyboardButton("ℹ️", callback_data="skill:plan:info"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Ralph", callback_data="skill:ralph:use"),
+            InlineKeyboardButton("ℹ️", callback_data="skill:ralph:info"),
+        ],
+    ]
+
+    await update.message.reply_text(
+        "🛠️ *可用技能*\n\n"
+        "点击技能名称直接使用，点击 ℹ️ 查看详情",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+# =====================================
 # 系统命令
 # =====================================
 
@@ -596,4 +742,9 @@ def get_command_handlers():
         CommandHandler("run", run_command),
         CommandHandler("status", status_command),
         CommandHandler("cancel", cancel_command),
+        # 技能触发命令
+        CommandHandler("skills", skills_command),
+        CommandHandler("plan", plan_command),
+        CommandHandler("ralph", ralph_command),
+        CommandHandler("cancel_ralph", cancel_ralph_command),
     ]

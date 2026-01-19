@@ -7,7 +7,7 @@ CloudWork Callback Query Handlers
 import logging
 from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
 from ...utils.auth import is_authorized
@@ -33,6 +33,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     - custom_input_{session_id} - 自定义输入
     - confirm_plan_{session_id} - 确认计划
     - cancel_plan_{session_id} - 取消计划
+    - cancel_task_{user_id} - 取消正在执行的任务
     - page_sessions_{page} - 会话分页
     - page_archived_{page} - 归档分页
     """
@@ -99,6 +100,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 归档分页
         elif data.startswith("page_archived_"):
             await _handle_archived_pagination(query, user_id, data)
+
+        # 取消任务
+        elif data.startswith("cancel_task_"):
+            await _handle_cancel_task(query, user_id, data)
+
+        # 技能菜单
+        elif data.startswith("skill:"):
+            await _handle_skill_callback(query, context, user_id, data)
 
         else:
             logger.warning(f"未知的回调数据: {data}")
@@ -312,6 +321,34 @@ async def _handle_cancel_plan(query, user_id: int, data: str):
     await query.edit_message_text("❌ 已取消计划")
 
 
+async def _handle_cancel_task(query, user_id: int, data: str):
+    """处理取消正在执行的任务"""
+    # 解析: cancel_task_{user_id}
+    parts = data.split("_")
+    if len(parts) < 3:
+        await query.edit_message_text("⚠️ 无效的数据")
+        return
+
+    target_user_id = int(parts[2])
+
+    # 安全检查：只能取消自己的任务
+    if target_user_id != user_id:
+        await query.edit_message_text("⚠️ 无法取消其他用户的任务")
+        return
+
+    # 获取当前活跃会话
+    session_id = session_manager.get_active_session_id(user_id)
+
+    # 尝试取消任务
+    cancelled = await task_manager.cancel_task(user_id, session_id)
+
+    if cancelled:
+        await query.edit_message_text("⏹️ 已取消任务")
+        logger.info(f"用户 {user_id} 通过按钮取消了任务")
+    else:
+        await query.edit_message_text("⚠️ 没有正在执行的任务")
+
+
 async def _handle_sessions_pagination(query, user_id: int, data: str):
     """处理会话列表分页"""
     page = int(data.split("_")[2])
@@ -414,6 +451,104 @@ def _find_task_by_session_prefix(user_id: int, session_id_prefix: str):
         if task.session_id and task.session_id.startswith(session_id_prefix):
             return task
     return None
+
+
+async def _handle_skill_callback(query, context: ContextTypes.DEFAULT_TYPE, user_id: int, data: str):
+    """处理技能按钮回调"""
+    parts = data.split(":")
+    if len(parts) < 3:
+        await query.edit_message_text("⚠️ 无效的技能数据")
+        return
+
+    skill_name = parts[1]  # plan 或 ralph
+    action = parts[2]      # use 或 info
+
+    if skill_name == "plan":
+        if action == "use":
+            # 存储等待状态，消息处理器会检测这个状态
+            context.user_data['pending_skill'] = 'plan'
+            # 发送新消息并强制回复
+            await query.message.reply_text(
+                "📋 *Planning\\-with\\-Files*\n\n请直接输入任务描述:",
+                parse_mode='MarkdownV2',
+                reply_markup=ForceReply(selective=True, input_field_placeholder="/plan 你的任务描述")
+            )
+            await query.answer()
+            return
+        else:  # info
+            text = (
+                "📋 *Planning\\-with\\-Files*\n\n"
+                "*功能:*\n"
+                "• 创建 task\\_plan\\.md \\- 任务计划\n"
+                "• 创建 findings\\.md \\- 发现记录\n"
+                "• 创建 progress\\.md \\- 进度追踪\n\n"
+                "*适用场景:*\n"
+                "• 复杂多步骤任务\n"
+                "• 研究项目\n"
+                "• 需要 \>5 次工具调用的任务"
+            )
+            keyboard = [[
+                InlineKeyboardButton("▶️ 使用", callback_data="skill:plan:use"),
+                InlineKeyboardButton("◀️ 返回", callback_data="skill:back:menu")
+            ]]
+
+    elif skill_name == "ralph":
+        if action == "use":
+            # 存储等待状态
+            context.user_data['pending_skill'] = 'ralph'
+            # 发送新消息并强制回复
+            await query.message.reply_text(
+                "🔄 *Ralph\\-Loop*\n\n请直接输入任务描述:\n\\(可选: 添加 `\\-\\-max N` 设置最大迭代次数\\)",
+                parse_mode='MarkdownV2',
+                reply_markup=ForceReply(selective=True, input_field_placeholder="/ralph 你的任务描述")
+            )
+            await query.answer()
+            return
+        else:  # info
+            text = (
+                "🔄 *Ralph\\-Loop*\n\n"
+                "*功能:*\n"
+                "• 自动迭代执行直到任务完成\n"
+                "• 每次迭代继承上次结果\n"
+                "• 输出完成标记时自动停止\n\n"
+                "*参数:*\n"
+                "• `\\-\\-max N` \\- 最大迭代次数 \\(默认 10\\)\n"
+                "• `\\-\\-promise TEXT` \\- 完成标记"
+            )
+            keyboard = [[
+                InlineKeyboardButton("▶️ 使用", callback_data="skill:ralph:use"),
+                InlineKeyboardButton("◀️ 返回", callback_data="skill:back:menu")
+            ]]
+
+    elif skill_name == "back":
+        # 返回技能列表
+        keyboard = [
+            [
+                InlineKeyboardButton("📋 Plan", callback_data="skill:plan:use"),
+                InlineKeyboardButton("ℹ️", callback_data="skill:plan:info"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Ralph", callback_data="skill:ralph:use"),
+                InlineKeyboardButton("ℹ️", callback_data="skill:ralph:info"),
+            ],
+        ]
+        text = "🛠️ *可用技能*\n\n点击技能名称直接使用，点击 ℹ️ 查看详情"
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    else:
+        await query.edit_message_text("⚠️ 未知的技能")
+        return
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='MarkdownV2'
+    )
 
 
 def get_callback_handlers():
