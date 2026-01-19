@@ -1,0 +1,54 @@
+# =====================================
+# CloudWork systemd Service
+# =====================================
+# Installation:
+#   sudo cp cloudwork.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable cloudwork
+#   sudo systemctl start cloudwork
+#
+# Commands:
+#   sudo systemctl status cloudwork
+#   sudo systemctl restart cloudwork
+#   sudo journalctl -u cloudwork -f
+
+[Unit]
+Description=CloudWork - Cloud Claude Code Workspace
+Documentation=https://github.com/xxx/cloudwork
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Working directory
+WorkingDirectory=/home/claude/cloudwork
+
+# Start command
+ExecStart=/usr/bin/python3 -m src.bot.main
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Environment
+EnvironmentFile=/home/claude/cloudwork/config/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudwork
+
+# Security hardening (optional)
+# ProtectSystem=strict
+# PrivateTmp=true
+# NoNewPrivileges=true
+# ReadWritePaths=/home/claude/cloudwork/data /home/claude/cloudwork/workspace /home/claude/cloudwork/logs
+
+# Resource limits (optional)
+# MemoryMax=2G
+# CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

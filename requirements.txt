@@ -1,0 +1,15 @@
+# =====================================
+# CloudWork Dependencies
+# =====================================
+
+# Telegram Bot
+python-telegram-bot>=20.7
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic-settings>=2.1.0
+
+# Async support
+aiofiles>=23.2.1
+
+# Utilities

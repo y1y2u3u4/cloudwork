@@ -1,0 +1,64 @@
+# =====================================
+# CloudWork Docker Compose
+# =====================================
+# Usage:
+#   cp config/.env.example config/.env
+#   # Edit config/.env with your tokens
+#   docker-compose up -d
+
+version: '3.8'
+
+services:
+  cloudwork:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: cloudwork
+    restart: unless-stopped
+
+    # Environment variables
+    env_file:
+      - config/.env
+
+    # Alternative: inline environment variables
+    # environment:
+    #   - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    #   - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
+    #   - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+    # Persistent volumes
+    volumes:
+      # Bot session data
+      - ./data:/app/data
+
+      # Workspace for user projects
+      - ./workspace:/app/workspace
+
+      # Claude CLI session data (important for --resume)
+      - claude-sessions:/root/.claude
+
+      # Logs (optional)
+      - ./logs:/app/logs
+
+    # Resource limits (optional)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 2G
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 512M
+
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Named volumes for Claude CLI sessions
+volumes:
+  claude-sessions:
+    name: cloudwork-claude-sessions

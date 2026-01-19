@@ -1,0 +1,89 @@
+# =====================================
+# CloudWork .gitignore
+# =====================================
+
+# =====================================
+# Python
+# =====================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# =====================================
+# IDE / Editor
+# =====================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# =====================================
+# Project Specific
+# =====================================
+
+# Configuration (contains secrets)
+config/.env
+.env
+
+# Session data
+data/sessions.json
+data/*.json
+
+# Claude CLI sessions (if mounted locally)
+.claude/
+
+# Logs
+logs/
+*.log
+
+# Workspace (user projects)
+workspace/*
+!workspace/.gitkeep
+
+# =====================================
+# Docker
+# =====================================
+.docker/
+
+# =====================================
+# Testing
+# =====================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# =====================================
+# Build artifacts
+# =====================================
+*.pyc
+*.pyo
+*.pyd
+.cache/

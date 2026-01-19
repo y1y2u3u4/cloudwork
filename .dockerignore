@@ -1,0 +1,71 @@
+# =====================================
+# CloudWork .dockerignore
+# =====================================
+# Files to exclude when building Docker image
+
+# Git
+.git
+.gitignore
+
+# Documentation (not needed at runtime)
+*.md
+docs/
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
+
+# Planning files
+task_plan.md
+findings.md
+progress.md
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# Workspace data (will be mounted as volume)
+workspace/*
+!workspace/.gitkeep
+
+# Session data (will be mounted as volume)
+data/*
+!data/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# Config with secrets
+config/.env
+
+# Tests (not needed at runtime)
+tests/
+
+# Examples (not needed at runtime)
+examples/
+
+# Scripts (optional, include if needed for setup)
+# scripts/
+
+# Docker files (prevent recursive builds)
+Dockerfile*
+docker-compose*
+.docker/
