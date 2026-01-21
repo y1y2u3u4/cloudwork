@@ -79,10 +79,116 @@ class ClaudeExecutor:
         except Exception as e:
             logger.error(f"发现项目时出错: {e}")
 
+    def get_directory_contents(self, relative_path: str = "") -> Dict[str, Any]:
+        """
+        获取指定目录的内容（用于层级浏览）
+
+        Args:
+            relative_path: 相对于 workspace 的路径，空字符串表示根目录
+
+        Returns:
+            {
+                "current_path": str,
+                "parent_path": str or None,
+                "dirs": [{"name": str, "path": str, "is_project": bool}],
+                "can_select": bool  # 当前目录是否可以作为项目选择
+            }
+        """
+        result = {
+            "current_path": relative_path,
+            "parent_path": None,
+            "dirs": [],
+            "can_select": False
+        }
+
+        # 计算父路径
+        if relative_path:
+            parts = relative_path.rstrip('/').split('/')
+            if len(parts) > 1:
+                result["parent_path"] = '/'.join(parts[:-1])
+            else:
+                result["parent_path"] = ""  # 返回根目录
+
+        # 构建完整路径
+        if relative_path:
+            full_path = os.path.join(self.workspace_dir, relative_path)
+            # 非根目录都可以作为项目选择
+            result["can_select"] = True
+        else:
+            full_path = self.workspace_dir
+
+        if not os.path.exists(full_path) or not os.path.isdir(full_path):
+            return result
+
+        try:
+            for item in sorted(os.listdir(full_path)):
+                # 跳过隐藏文件
+                if item.startswith('.'):
+                    continue
+
+                item_full_path = os.path.join(full_path, item)
+                if os.path.isdir(item_full_path):
+                    # 计算相对路径
+                    if relative_path:
+                        item_relative_path = f"{relative_path}/{item}"
+                    else:
+                        item_relative_path = item
+
+                    # 检查是否是已注册的项目
+                    is_project = item_relative_path in self.projects
+
+                    result["dirs"].append({
+                        "name": item,
+                        "path": item_relative_path,
+                        "is_project": is_project
+                    })
+        except Exception as e:
+            logger.error(f"获取目录内容时出错: {e}")
+
+        return result
+
+    def get_top_level_items(self) -> list:
+        """获取顶级项目/目录列表（用于 /project 命令初始显示）"""
+        items = [{"name": "default", "path": "default", "is_special": True}]
+
+        if not os.path.exists(self.workspace_dir):
+            return items
+
+        try:
+            for item in sorted(os.listdir(self.workspace_dir)):
+                if item.startswith('.'):
+                    continue
+                item_path = os.path.join(self.workspace_dir, item)
+                if os.path.isdir(item_path):
+                    items.append({
+                        "name": item,
+                        "path": item,
+                        "is_special": False
+                    })
+        except Exception as e:
+            logger.error(f"获取顶级目录时出错: {e}")
+
+        return items
+
     def get_project_dir(self, project: str) -> str:
         """获取项目目录"""
+        # default 项目使用 work_dir
+        if project == "default":
+            return self.work_dir
+
+        # 已注册的项目
         if project in self.projects:
             return self.projects[project]
+
+        # 未注册但在 workspace 下的路径（支持任意深度）
+        potential_path = os.path.join(self.workspace_dir, project)
+        if os.path.exists(potential_path) and os.path.isdir(potential_path):
+            # 动态注册这个项目
+            self.projects[project] = potential_path
+            logger.info(f"动态注册项目: {project} -> {potential_path}")
+            return potential_path
+
+        # 兜底返回 work_dir
         return self.work_dir
 
     def get_user_project_dir(self, user_id: int) -> str:
@@ -188,14 +294,16 @@ class ClaudeExecutor:
         cmd = self.build_command(prompt, session_id, model, execution_mode)
         logger.info(f"流式执行命令 (model={model}): {' '.join(cmd[:5])}...")
 
-        # 创建子进程
+        # 创建子进程（增大缓冲区限制以处理大文件输出）
+        # 默认 limit 是 64KB，Claude 读取大文件时可能超出
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
-            env=self.build_claude_env()
+            env=self.build_claude_env(),
+            limit=1024 * 1024  # 1MB 缓冲区限制
         )
 
         # 创建任务

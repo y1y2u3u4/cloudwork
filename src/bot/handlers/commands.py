@@ -72,7 +72,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /new \\[名称\\] \\- 创建新会话
 • /sessions \\- 查看和切换会话
 • /archived \\- 查看归档会话
+• /clear \\- 清理当前会话上下文
 • 回复历史消息 \\- 自动切换到该会话
+
+*引用回复:*
+• 回复 Bot 消息 \\- 将 Bot 回复作为上下文引用
 
 *执行命令:*
 • /run <prompt> \\- 独立执行（不影响会话）
@@ -93,7 +97,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *提示:*
 • 会话 30 分钟无活动自动归档
-• 可以通过回复历史消息快速切换会话
+• 回复 Bot 消息可将其作为上下文引用
 """
 
     await update.message.reply_text(
@@ -363,7 +367,8 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """切换或查看当前项目"""
+    """切换或查看当前项目（层级浏览）"""
+    logger.info(f"收到 /project 命令: user={update.effective_user.id if update.effective_user else 'unknown'}")
     user = update.effective_user
 
     if not is_authorized(user.id):
@@ -389,25 +394,48 @@ async def project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # 显示项目选择按钮
+    # 显示顶级项目/目录（层级浏览入口）
+    top_items = claude_executor.get_top_level_items()
     keyboard = []
-    for project_key, project_path in claude_executor.projects.items():
-        prefix = "✅ " if project_key == current_project else ""
-        # 截断过长的路径
-        display_path = project_path if len(project_path) < 30 else "..." + project_path[-27:]
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{prefix}{project_key}",
-                callback_data=f"set_project:{project_key}"
-            )
-        ])
+
+    for item in top_items:
+        name = item["name"]
+        path = item["path"]
+        is_special = item.get("is_special", False)
+
+        # 标记当前选中的项目
+        prefix = "✅ " if path == current_project else ""
+
+        if is_special:
+            # default 特殊项目，直接选择
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{prefix}📌 {name}",
+                    callback_data=f"select_project:{path}"
+                )
+            ])
+        else:
+            # 普通目录，可以进入浏览
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{prefix}📁 {name}",
+                    callback_data=f"browse_dir:{path}"
+                ),
+                InlineKeyboardButton(
+                    "✓ 选择",
+                    callback_data=f"select_project:{path}"
+                )
+            ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     current_path = claude_executor.projects.get(current_project, "未知")
 
     await update.message.reply_text(
-        f"📁 *项目选择*\n\n当前项目: *{current_project}*\n路径: `{current_path}`",
+        f"📁 *项目选择*\n\n"
+        f"当前项目: *{escape_markdown(current_project)}*\n"
+        f"路径: `{current_path}`\n\n"
+        f"💡 点击文件夹进入子目录，点击「✓ 选择」确认项目",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
@@ -553,10 +581,10 @@ async def ralph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.message.reply_text(
             "🔄 *Ralph\\-Loop 技能*\n\n"
-            "用法: `/ralph <任务描述> [\\-\\-max N] [\\-\\-promise TEXT]`\n\n"
+            "用法: `/ralph <任务描述> [\\-max N] [\\-completion TEXT]`\n\n"
             "参数:\n"
-            "• `\\-\\-max N`: 最大迭代次数 \\(默认 10\\)\n"
-            "• `\\-\\-promise TEXT`: 完成标记 \\(默认 RALPH\\_DONE\\)\n\n"
+            "• `\\-max N`: 最大迭代次数 \\(默认 10\\)\n"
+            "• `\\-completion TEXT`: 完成标记 \\(默认 COMPLETE\\)\n\n"
             "功能:\n"
             "• 自动迭代执行直到任务完成\n"
             "• 每次迭代继承上次结果继续改进\n"
@@ -566,25 +594,47 @@ async def ralph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 解析参数
+    # 解析参数（支持多种格式）
+    # 支持: -max 10, --max 10, - max 10（空格分隔）
+    # 支持: -promise X, --promise X, - promise X, -completion X
     max_iterations = 10
-    completion_promise = "RALPH_DONE"
+    completion_promise = "COMPLETE"
     prompt_parts = []
 
+    # 预处理：合并单独的 "-" 或 "--" 与后续 token
+    # 例如: ["-", "max", "10"] -> ["-max", "10"]
+    processed_args = []
     i = 0
     while i < len(args):
-        if args[i] == "--max" and i + 1 < len(args):
+        arg = args[i]
+        if arg in ("-", "--") and i + 1 < len(args):
+            # 合并 "-" 或 "--" 与下一个 token
+            next_arg = args[i + 1]
+            if not next_arg.startswith("-"):
+                processed_args.append(f"{arg}{next_arg}")
+                i += 2
+                continue
+        processed_args.append(arg)
+        i += 1
+
+    # 解析处理后的参数
+    i = 0
+    while i < len(processed_args):
+        arg = processed_args[i]
+        # 支持 -max 和 --max
+        if arg in ("-max", "--max", "--max-iterations") and i + 1 < len(processed_args):
             try:
-                max_iterations = int(args[i + 1])
+                max_iterations = int(processed_args[i + 1])
                 i += 2
                 continue
             except ValueError:
                 pass
-        elif args[i] == "--promise" and i + 1 < len(args):
-            completion_promise = args[i + 1]
+        # 支持 -completion/-promise 和 --completion/--promise
+        elif arg in ("-completion", "--completion", "-promise", "--promise", "--completion-promise") and i + 1 < len(processed_args):
+            completion_promise = processed_args[i + 1]
             i += 2
             continue
-        prompt_parts.append(args[i])
+        prompt_parts.append(processed_args[i])
         i += 1
 
     prompt = " ".join(prompt_parts)
@@ -593,8 +643,10 @@ async def ralph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 请提供任务描述")
         return
 
-    # 构建技能触发 prompt
-    skill_prompt = f'/ralph-loop "{prompt}" --completion-promise "{completion_promise}" --max-iterations {max_iterations}'
+    # 构建技能调用 prompt
+    # 明确指示使用 Skill 工具调用技能
+    skill_args = f'{prompt} --max-iterations {max_iterations} --completion-promise "{completion_promise}"'
+    skill_prompt = f'使用 Skill 工具调用技能，skill 参数为 "ralph-loop:ralph-loop"，args 参数为 "{skill_args}"'
 
     # 通过消息处理流程执行
     from .messages import handle_message
@@ -720,6 +772,40 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已取消 {cancelled_count} 个任务")
 
 
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """清理当前会话上下文（保留会话名称）"""
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    # 获取当前活跃会话
+    active_session_id = session_manager.get_active_session_id(user.id)
+
+    if not active_session_id:
+        await update.message.reply_text("ℹ️ 当前没有活跃会话")
+        return
+
+    # 获取会话信息
+    session_data = session_manager.get_session(user.id, active_session_id)
+    if not session_data:
+        await update.message.reply_text("ℹ️ 会话不存在")
+        return
+
+    session_name = session_data.get("name", "未命名")
+
+    # 清理会话上下文（删除旧会话，创建同名新会话）
+    session_manager.clear_session_context(user.id, active_session_id)
+
+    await update.message.reply_text(
+        f"🧹 已清理会话上下文\n\n"
+        f"会话: *{escape_markdown(session_name)}*\n"
+        f"发送新消息开始全新对话",
+        parse_mode='Markdown'
+    )
+
+
 # =====================================
 # 命令注册辅助函数
 # =====================================
@@ -742,6 +828,7 @@ def get_command_handlers():
         CommandHandler("run", run_command),
         CommandHandler("status", status_command),
         CommandHandler("cancel", cancel_command),
+        CommandHandler("clear", clear_command),
         # 技能触发命令
         CommandHandler("skills", skills_command),
         CommandHandler("plan", plan_command),

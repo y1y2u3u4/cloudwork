@@ -41,19 +41,17 @@ async def post_init(application: Application) -> None:
     # 设置 Bot 命令菜单
     from telegram import BotCommand
     commands = [
-        BotCommand("start", "开始使用 / 帮助信息"),
-        BotCommand("run", "独立执行任务"),
+        BotCommand("project", "切换项目"),
+        BotCommand("clear", "清理会话上下文"),
         BotCommand("skills", "查看可用技能"),
         BotCommand("sessions", "查看和切换会话"),
         BotCommand("new", "创建新会话"),
-        BotCommand("archived", "查看归档会话"),
         BotCommand("model", "切换模型"),
         BotCommand("mode", "切换执行模式"),
-        BotCommand("project", "切换项目"),
         BotCommand("settings", "设置菜单"),
         BotCommand("status", "查看运行状态"),
         BotCommand("cancel", "取消当前任务"),
-        BotCommand("delete", "删除会话"),
+        BotCommand("start", "开始使用 / 帮助信息"),
     ]
 
     try:
@@ -121,12 +119,13 @@ def main():
     logger.info(f"Work directory: {settings.work_dir}")
     logger.info(f"Workspace directory: {settings.workspace_dir}")
 
-    # 创建应用
+    # 创建应用（启用并发更新处理，允许在任务执行时响应其他命令）
     application = (
         Application.builder()
         .token(settings.telegram_bot_token)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
+        .concurrent_updates(True)  # 启用并发更新处理
         .build()
     )
 

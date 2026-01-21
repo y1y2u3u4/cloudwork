@@ -304,6 +304,52 @@ class SessionManager:
 
         return False
 
+    def clear_session_context(self, user_id: int, session_id: str) -> Optional[str]:
+        """
+        清理会话上下文（保留会话名称，删除旧会话并创建新会话）
+
+        Args:
+            user_id: 用户 ID
+            session_id: 要清理的会话 ID
+
+        Returns:
+            新会话 ID，如果失败则返回 None
+        """
+        user_data = self.get_or_create_user_data(user_id)
+
+        if session_id not in user_data.sessions:
+            return None
+
+        # 保存旧会话信息
+        old_session = user_data.sessions[session_id]
+        old_name = old_session.get("name", "未命名")
+        old_project = old_session.get("project")
+
+        # 删除旧会话
+        del user_data.sessions[session_id]
+
+        # 生成新会话 ID
+        new_session_id = self.generate_pending_session_id(user_id)
+
+        # 创建同名新会话
+        now = datetime.now().isoformat()
+        new_session = Session(
+            id=new_session_id,
+            name=old_name,
+            created_at=now,
+            last_active=now,
+            message_count=0,
+            project=old_project
+        )
+
+        user_data.sessions[new_session_id] = new_session.to_dict()
+        user_data.active = new_session_id
+
+        self.save_sessions()
+        logger.info(f"清理会话上下文: {session_id[:8]}... -> {new_session_id[:8]}...")
+
+        return new_session_id
+
     def check_and_archive_sessions(self, auto_archive_minutes: Optional[int] = None):
         """
         检查并自动归档长时间未活动的会话
@@ -380,9 +426,17 @@ class SessionManager:
         return user_data.project
 
     def set_user_project(self, user_id: int, project: str):
-        """设置用户项目"""
+        """设置用户项目（同时清除活跃会话，为新项目创建新会话）"""
         user_data = self.get_or_create_user_data(user_id)
+        old_project = user_data.project
         user_data.project = project
+
+        # 切换项目时清除活跃会话，这样可以在新项目中启动新任务
+        # 即使旧项目有运行中的任务，也不会阻塞新项目的操作
+        if old_project != project:
+            user_data.active = None
+            logger.info(f"切换项目 {old_project} -> {project}，清除活跃会话")
+
         self.save_sessions()
 
     def set_pending_name(self, user_id: int, name: str):

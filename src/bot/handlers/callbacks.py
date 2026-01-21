@@ -73,9 +73,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("set_mode:"):
             await _handle_set_mode(query, user_id, data)
 
-        # 设置项目
+        # 设置项目（旧版兼容）
         elif data.startswith("set_project:"):
             await _handle_set_project(query, user_id, data)
+
+        # 浏览目录（层级浏览）
+        elif data.startswith("browse_dir:"):
+            await _handle_browse_dir(query, user_id, data)
+
+        # 选择项目（显示确认）
+        elif data.startswith("select_project:"):
+            await _handle_select_project(query, user_id, data)
+
+        # 确认项目选择
+        elif data.startswith("confirm_project:"):
+            await _handle_confirm_project(query, user_id, data)
+
+        # 返回项目根目录
+        elif data == "back_project_root":
+            await _handle_back_project_root(query, user_id)
 
         # 回答 AskUserQuestion 选项
         elif data.startswith("answer_opt_"):
@@ -219,6 +235,185 @@ async def _handle_set_project(query, user_id: int, data: str):
     await query.edit_message_text(message, parse_mode='Markdown')
 
 
+async def _handle_browse_dir(query, user_id: int, data: str):
+    """处理浏览目录（层级浏览）"""
+    relative_path = data.split(":", 1)[1]
+
+    # 获取目录内容
+    dir_info = claude_executor.get_directory_contents(relative_path)
+    current_path = dir_info["current_path"]
+    parent_path = dir_info["parent_path"]
+    dirs = dir_info["dirs"]
+    can_select = dir_info["can_select"]
+
+    current_project = session_manager.get_user_project(user_id)
+
+    # 构建按钮
+    keyboard = []
+
+    # 返回上级按钮
+    if parent_path is not None:
+        if parent_path == "":
+            keyboard.append([
+                InlineKeyboardButton("⬆️ 返回根目录", callback_data="back_project_root")
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton(f"⬆️ 返回上级", callback_data=f"browse_dir:{parent_path}")
+            ])
+
+    # 子目录列表
+    for d in dirs:
+        name = d["name"]
+        path = d["path"]
+        prefix = "✅ " if path == current_project else ""
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{prefix}📁 {name}",
+                callback_data=f"browse_dir:{path}"
+            ),
+            InlineKeyboardButton(
+                "✓ 选择",
+                callback_data=f"select_project:{path}"
+            )
+        ])
+
+    # 如果当前目录可以作为项目选择（有内容但没有子目录）
+    if can_select and not dirs:
+        keyboard.append([
+            InlineKeyboardButton(
+                "✓ 选择当前目录",
+                callback_data=f"select_project:{current_path}"
+            )
+        ])
+
+    # 如果目录为空
+    if not dirs and not can_select:
+        keyboard.append([
+            InlineKeyboardButton("📭 空目录", callback_data="noop")
+        ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        f"📂 浏览: `{current_path or '/'}`\n\n"
+        f"点击 📁 进入子目录，点击 ✓ 选择项目",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
+async def _handle_select_project(query, user_id: int, data: str):
+    """处理选择项目（显示确认对话框）"""
+    project = data.split(":", 1)[1]
+
+    current_project = session_manager.get_user_project(user_id)
+    project_dir = claude_executor.get_project_dir(project)
+
+    # 构建确认信息
+    is_same = project == current_project
+    if is_same:
+        message = (
+            f"📌 当前项目: *{project}*\n"
+            f"工作目录: `{project_dir}`\n\n"
+            f"_这已经是当前活跃项目_"
+        )
+        keyboard = [[
+            InlineKeyboardButton("⬅️ 返回", callback_data="back_project_root")
+        ]]
+    else:
+        message = (
+            f"🔄 确认切换到项目?\n\n"
+            f"项目: *{project}*\n"
+            f"工作目录: `{project_dir}`\n\n"
+            f"⚠️ 切换项目将归档当前会话"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ 确认切换", callback_data=f"confirm_project:{project}"),
+                InlineKeyboardButton("❌ 取消", callback_data="back_project_root")
+            ]
+        ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
+async def _handle_confirm_project(query, user_id: int, data: str):
+    """处理确认项目选择"""
+    project = data.split(":", 1)[1]
+
+    current_project = session_manager.get_user_project(user_id)
+
+    # 如果切换到不同的项目，归档当前会话
+    if project != current_project:
+        current_session_id = session_manager.get_active_session_id(user_id)
+        if current_session_id:
+            session_manager.archive_session(user_id, current_session_id)
+            logger.info(f"切换项目时归档会话: {current_session_id[:8]}...")
+
+    session_manager.set_user_project(user_id, project)
+    project_dir = claude_executor.get_project_dir(project)
+
+    # 构建提示信息
+    message = f"✅ 已切换到项目: *{project}*\n工作目录: `{project_dir}`"
+    if project != current_project:
+        message += "\n\n💡 已归档之前的会话，下次发消息将创建新会话"
+
+    await query.edit_message_text(message, parse_mode='Markdown')
+
+
+async def _handle_back_project_root(query, user_id: int):
+    """处理返回项目根目录"""
+    current_project = session_manager.get_user_project(user_id)
+
+    # 获取顶级项目列表
+    top_items = claude_executor.get_top_level_items()
+
+    keyboard = []
+    for item in top_items:
+        name = item["name"]
+        path = item["path"]
+        is_special = item.get("is_special", False)
+        prefix = "✅ " if path == current_project else ""
+
+        if is_special:
+            # default 特殊项目，直接选择
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{prefix}📌 {name}",
+                    callback_data=f"select_project:{path}"
+                )
+            ])
+        else:
+            # 普通目录，可以进入浏览
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{prefix}📁 {name}",
+                    callback_data=f"browse_dir:{path}"
+                ),
+                InlineKeyboardButton(
+                    "✓ 选择",
+                    callback_data=f"select_project:{path}"
+                )
+            ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        f"📂 选择项目\n当前: *{current_project}*\n\n"
+        f"点击 📁 进入子目录，点击 ✓ 选择项目",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
 async def _handle_answer_option(query, user_id: int, data: str):
     """处理 AskUserQuestion 选项回答"""
     # 解析: answer_opt_{session_id}_{option_index}
@@ -325,11 +520,15 @@ async def _handle_cancel_task(query, user_id: int, data: str):
     """处理取消正在执行的任务"""
     # 解析: cancel_task_{user_id}
     parts = data.split("_")
-    if len(parts) < 3:
+    if len(parts) < 3 or not parts[2]:
         await query.edit_message_text("⚠️ 无效的数据")
         return
 
-    target_user_id = int(parts[2])
+    try:
+        target_user_id = int(parts[2])
+    except ValueError:
+        await query.edit_message_text("⚠️ 无效的用户ID")
+        return
 
     # 安全检查：只能取消自己的任务
     if target_user_id != user_id:

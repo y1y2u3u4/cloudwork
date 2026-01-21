@@ -5,8 +5,9 @@ CloudWork Message Handlers
 """
 
 import logging
+import shlex
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
@@ -69,8 +70,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"技能快捷输入: {pending_skill} -> {prompt[:50]}...")
         # 转发到命令处理器
         from .commands import plan_command, ralph_command
-        # 设置命令参数（命令处理器使用 context.args 获取参数）
-        context.args = [prompt]
+        # 使用 shlex.split 正确解析参数（保留引号内的空格）
+        try:
+            context.args = shlex.split(prompt)
+        except ValueError:
+            # 如果 shlex 解析失败（如引号不匹配），fallback 到简单空格分割
+            context.args = prompt.split()
         if pending_skill == 'plan':
             await plan_command(update, context)
         elif pending_skill == 'ralph':
@@ -79,15 +84,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"收到消息: user={user_id}, text={prompt[:50]}...")
 
-    # 检查是否回复了某条消息（自动切换会话）
-    session_id = await _handle_reply_session_switch(update, user_id)
+    # 检查是否回复了某条消息（自动切换会话并获取引用内容）
+    session_id, quoted_content = await _handle_reply_session_switch(update, user_id)
+
+    # 如果有被引用的 bot 消息内容，添加到 prompt 中作为上下文
+    if quoted_content:
+        # 构建带引用上下文的 prompt
+        prompt = f"[引用的上下文]\n{quoted_content}\n\n[用户的问题]\n{prompt}"
+        logger.info(f"添加引用上下文: {len(quoted_content)} 字符")
 
     # 如果没有通过回复切换，使用当前活跃会话
     if not session_id:
         session_id = session_manager.get_active_session_id(user_id)
 
-    # 检查是否有运行中的任务
-    if task_manager.has_running_task(user_id, session_id):
+    # 检查是否有运行中的任务（仅检查当前会话，允许在不同会话中并行执行）
+    # 如果 session_id 是 None，说明要创建新会话，不阻止
+    if session_id and task_manager.has_running_task(user_id, session_id):
         # 检查是否在等待用户输入
         if task_manager.is_waiting_input(user_id, session_id):
             # 设置用户回复
@@ -96,7 +108,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         else:
             await update.message.reply_text(
-                "⏳ 有任务正在执行中，请点击上方消息的「取消任务」按钮打断"
+                "⏳ 当前会话有任务正在执行中\n\n"
+                "• 点击「取消任务」按钮打断\n"
+                "• 或切换项目/会话后发送新任务"
             )
             return
 
@@ -234,26 +248,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _handle_reply_session_switch(
     update: Update,
     user_id: int
-) -> Optional[str]:
+) -> Tuple[Optional[str], Optional[str]]:
     """
-    处理回复消息时的会话切换
+    处理回复消息时的会话切换和上下文引用
 
-    如果用户回复了某条历史消息，自动切换到该消息所属的会话
+    如果用户回复了某条历史消息：
+    1. 自动切换到该消息所属的会话
+    2. 获取被回复的消息内容作为上下文
+
+    Returns:
+        (session_id, quoted_content) - 会话 ID 和被引用的消息内容
     """
     if not update.message.reply_to_message:
-        return None
+        return None, None
 
-    reply_msg_id = update.message.reply_to_message.message_id
+    reply_msg = update.message.reply_to_message
+    reply_msg_id = reply_msg.message_id
+
+    # 获取被回复的消息内容（仅获取 bot 发送的消息内容）
+    quoted_content = None
+    if reply_msg.from_user and reply_msg.from_user.is_bot:
+        # 这是 bot 发送的消息，提取内容作为上下文
+        if reply_msg.text:
+            quoted_content = reply_msg.text
+        elif reply_msg.caption:
+            quoted_content = reply_msg.caption
 
     # 从映射中查找会话 ID
+    session_id = None
     if reply_msg_id in message_session_map:
         session_id = message_session_map[reply_msg_id]
         # 切换到该会话
         session_manager.set_active_session(user_id, session_id)
         logger.info(f"通过回复消息切换会话: {session_id[:8]}...")
-        return session_id
 
-    return None
+    return session_id, quoted_content
 
 
 async def _handle_ask_user_question(
