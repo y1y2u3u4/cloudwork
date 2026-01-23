@@ -1,164 +1,144 @@
 # CLAUDE.md
 
-CloudWork 项目开发指南，供 Claude Code 参考。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## 项目概述
+## Project Overview
 
-CloudWork 是一个云端 Claude Code 工作空间，通过 Telegram Bot 远程触发 AI 编程任务。
+cloudwork 是一个在 VPS 上运行 Claude Code 的远程自动化系统，通过 Telegram Bot 远程触发任务，支持多会话管理。
 
-## 目录结构
+## Architecture
 
 ```
-cloudwork/
-├── src/
-│   ├── bot/
-│   │   ├── main.py           # Bot 主入口
-│   │   ├── handlers/         # 命令/消息/回调处理
-│   │   │   ├── commands.py
-│   │   │   ├── messages.py
-│   │   │   └── callbacks.py
-│   │   └── services/         # 核心服务
-│   │       ├── claude.py     # Claude CLI 执行
-│   │       ├── session.py    # 会话管理
-│   │       └── task.py       # 任务队列
-│   └── utils/
-│       ├── config.py         # 配置管理
-│       ├── auth.py           # 用户认证
-│       └── formatters.py     # 输出格式化
-├── config/
-│   └── .env.example          # 配置模板
-├── data/                     # 会话数据 (运行时)
-├── workspace/                # 任务工作空间 (运行时)
-├── scripts/
-│   ├── setup-vps.sh          # VPS 安装脚本
-│   └── claude-bot.service    # systemd 服务
-├── docs/                     # 文档
-├── tests/                    # 测试
-├── Dockerfile
-├── docker-compose.yml
-└── requirements.txt
+┌─────────────────┐       ┌─────────────────────────────────┐
+│   Local macOS   │◄─────►│        VPS Server               │
+│   (开发环境)     │ Sync  │      (104.244.93.244)           │
+│   cloudwork/    │ Thing │  tasks/cloudwork/ ← Bot运行目录  │
+└─────────────────┘       └─────────────────────────────────┘
+                                        │
+                                        │ systemd (claude-bot.service)
+                                        ▼
+                                ┌─────────────────┐
+                                │  src/bot/main.py │
+                                │    (主入口)      │
+                                └─────────────────┘
+                                        │
+                                asyncio subprocess
+                                        ▼
+                                ┌─────────────────┐
+                                │   Claude CLI    │
+                                │  (claude -p)    │
+                                └─────────────────┘
 ```
 
-## 开发命令
+## Syncthing 同步
 
+**同步目录映射：**
+- 本地: `/Users/zhanggongqing/project/孵化项目/cloudwork`
+- VPS: `/home/claude/vps-cloud-runner/tasks/cloudwork`
+
+**重要：Bot 直接运行 Syncthing 同步目录的代码！**
+
+**常见问题排查：**
+- 如果 Syncthing 显示 "folder marker missing" 错误，需要重建 `.stfolder` 目录：
+  ```bash
+  mkdir -p /Users/zhanggongqing/project/孵化项目/cloudwork/.stfolder
+  ```
+- 如果本地文件丢失，可能是同步冲突，从 VPS 拉取：
+  ```bash
+  source config/.env && sshpass -p "$VPS_PASSWORD" scp -r ${VPS_USER}@${VPS_HOST}:/home/claude/vps-cloud-runner/tasks/cloudwork/src ./
+  ```
+
+## Key Components
+
+```
+src/
+├── bot/
+│   ├── main.py              # 主入口（python -m src.bot.main）
+│   ├── handlers/
+│   │   ├── commands.py      # /start, /cancel, /project 等命令
+│   │   ├── messages.py      # 消息处理（调用 Claude CLI）
+│   │   └── callbacks.py     # 按钮回调处理
+│   └── services/
+│       ├── claude.py        # Claude CLI 执行器
+│       ├── session.py       # 会话管理
+│       ├── task.py          # 任务管理
+│       └── skills.py        # 技能系统
+└── utils/
+    ├── config.py            # 配置管理（pydantic-settings）
+    ├── auth.py              # 用户认证
+    └── formatters.py        # 输出格式化
+```
+
+- **data/sessions.json**: 会话持久化存储
+- **config/.env**: 环境变量配置
+
+## Commands
+
+### VPS 操作
 ```bash
-# 安装依赖
-pip install -r requirements.txt
+# SSH 到 VPS
+source config/.env && sshpass -p "$VPS_PASSWORD" ssh ${VPS_USER}@${VPS_HOST}
 
-# 本地运行 (需要配置 config/.env)
-cd src && python -m bot.main
+# Bot 管理（在 VPS 上执行）
+systemctl restart claude-bot    # 重启 Bot（代码通过 Syncthing 自动同步，只需重启）
+systemctl status claude-bot     # 查看状态
+journalctl -u claude-bot -f     # 实时日志
 
-# Docker 构建
-docker build -t cloudwork .
-
-# Docker 运行
-docker-compose up -d
+# 手动同步代码（通常不需要，Syncthing 会自动同步）
+source config/.env && sshpass -p "$VPS_PASSWORD" scp -r src/* ${VPS_USER}@${VPS_HOST}:/home/claude/vps-cloud-runner/tasks/cloudwork/src/
 ```
 
-## 代码规范
-
-### Python 版本兼容
-
-目标兼容 Python 3.9+，类型注解使用兼容写法：
-
-```python
-# ✅ 正确 (Python 3.9 兼容)
-from typing import Optional, Tuple, List, Dict
-
-def func(x: Optional[str]) -> Tuple[str, str]:
-    pass
-
-# ❌ 避免 (Python 3.10+ 语法)
-def func(x: str | None) -> tuple[str, str]:
-    pass
-```
-
-### 模块导入
-
-```python
-# src/bot/handlers/commands.py
-from ..services.claude import execute_claude
-from ..services.session import SessionManager
-from ...utils.config import settings
-```
-
-### 配置访问
-
-```python
-from src.utils.config import settings
-
-# 使用配置
-token = settings.telegram_bot_token
-model = settings.default_model
-```
-
-## 核心功能
-
-1. **多会话管理**: 每用户独立会话，30分钟无活动自动归档
-2. **流式输出**: 实时显示 Claude 执行过程
-3. **交互式问答**: 响应 Claude 的用户确认请求
-4. **多模型支持**: sonnet / opus / haiku 动态切换
-5. **项目发现**: 自动扫描 workspace 目录中的项目
-
-## 环境变量
-
-必需:
-- `TELEGRAM_BOT_TOKEN`: Telegram Bot Token
-- `TELEGRAM_ALLOWED_USERS`: 授权用户 ID (逗号分隔)
-
-Claude API (二选一):
-- `ANTHROPIC_API_KEY`: 官方 API Key
-- `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`: 自定义代理
-
-可选:
-- `DEFAULT_MODEL`: 默认模型 (sonnet)
-- `DEFAULT_MODE`: 执行模式 (auto)
-- `COMMAND_TIMEOUT`: 命令超时秒数 (300)
-
-## 部署注意事项
-
-### 服务运行用户 (重要!)
-
-**服务必须以 `claude` 用户运行，不能以 root 运行！**
-
-原因：Claude CLI 的 `--dangerously-skip-permissions` 参数在 root 权限下会被拒绝执行，这是 Claude CLI 的安全限制。
-
-正确的 systemd 服务配置：
+### systemd 服务配置
 ```ini
+# /etc/systemd/system/claude-bot.service
 [Service]
-User=claude
-Group=claude
-WorkingDirectory=/home/claude/cloudwork
-EnvironmentFile=/home/claude/cloudwork/config/.env
-Environment=PYTHONPATH=/home/claude/cloudwork
+WorkingDirectory=/home/claude/vps-cloud-runner/tasks/cloudwork
+EnvironmentFile=/home/claude/vps-cloud-runner/tasks/cloudwork/config/.env
 ExecStart=/usr/bin/python3 -m src.bot.main
 ```
 
-### VPS 部署
-
-1. 确保 `claude` 用户存在：
-   ```bash
-   useradd -m -s /bin/bash claude
-   ```
-
-2. 项目目录权限：
-   ```bash
-   chown -R claude:claude /home/claude/cloudwork
-   ```
-
-3. 启动服务：
-   ```bash
-   systemctl daemon-reload
-   systemctl start cloudwork
-   systemctl enable cloudwork
-   ```
-
-## 测试
-
+### 本地测试
 ```bash
-# 运行测试
-pytest tests/
+# 需要先设置环境变量
+export $(cat config/.env | xargs)
+python -m src.bot.main
+```
 
-# 带覆盖率
-pytest --cov=src tests/
+## Environment Variables
+
+| 变量 | 用途 |
+|------|------|
+| `ANTHROPIC_BASE_URL` | 自定义 API 端点 |
+| `ANTHROPIC_AUTH_TOKEN` | 自定义端点认证 Token |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
+| `TELEGRAM_ALLOWED_USERS` | 授权用户 ID（逗号分隔）|
+| `VPS_HOST` / `VPS_USER` / `VPS_PASSWORD` | VPS SSH 连接信息 |
+
+## Telegram Bot Commands
+
+| 命令 | 功能 |
+|------|------|
+| `/start` | 帮助信息 |
+| `/run <prompt>` | 独立执行（不影响会话）|
+| `/sessions` | 查看和切换会话 |
+| `/new [名称]` | 创建新会话 |
+| `/archived` | 查看归档会话 |
+| `/delete <会话ID>` | 删除会话 |
+| 直接发消息 | 在当前活跃会话中对话 |
+| 回复历史消息 | 自动切换到该消息的会话 |
+
+## Session Management
+
+会话数据结构在 `data/sessions.json`：
+- 每个用户有独立的会话列表
+- 会话 30 分钟无活动自动归档
+- 支持 AI 自动命名（根据首条消息）
+- 通过按钮或回复消息切换会话
+
+## Python 兼容性
+
+VPS 运行 Python 3.9，类型注解需使用：
+```python
+from typing import Optional, Tuple
+def func(x: Optional[str]) -> Tuple[str, str]:  # 不要用 str | None 或 tuple[str, str]
 ```

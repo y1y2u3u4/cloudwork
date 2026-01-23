@@ -747,7 +747,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """取消当前任务"""
+    """取消当前任务（包括 Ralph Loop）"""
     user = update.effective_user
 
     if not is_authorized(user.id):
@@ -755,21 +755,84 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     from ..services.task import task_manager
+    import os
+    import glob
+    import subprocess
 
-    # 获取用户所有任务
+    cancelled_items = []
+
+    # 1. 取消 task_manager 中的任务
     tasks = task_manager.get_user_tasks(user.id)
+    for task in tasks:
+        await task_manager.cancel_task(user.id, task.session_id)
+        cancelled_items.append(f"任务 {task.session_id[:8] if task.session_id else 'unknown'}...")
 
-    if not tasks:
+    # 2. 查找并删除所有 ralph-loop.local.md 文件
+    # 使用多个搜索路径确保能找到文件
+    search_paths = [
+        claude_executor.workspace_dir,  # workspace 目录
+        claude_executor.work_dir,       # 工作目录
+        claude_executor.get_user_project_dir(user.id),  # 用户当前项目目录
+    ]
+
+    # 去重
+    search_paths = list(set(p for p in search_paths if p and os.path.exists(p)))
+
+    ralph_files_found = set()
+    for search_path in search_paths:
+        # 搜索当前目录的 .claude 文件夹
+        direct_file = os.path.join(search_path, '.claude', 'ralph-loop.local.md')
+        if os.path.exists(direct_file):
+            ralph_files_found.add(direct_file)
+
+        # 递归搜索子目录
+        ralph_files = glob.glob(f"{search_path}/**/.claude/ralph-loop.local.md", recursive=True)
+        ralph_files_found.update(ralph_files)
+
+    for ralph_file in ralph_files_found:
+        try:
+            # 读取迭代次数
+            iteration = "unknown"
+            with open(ralph_file, 'r') as f:
+                file_content = f.read()
+                for line in file_content.split('\n'):
+                    if line.startswith('iteration:'):
+                        iteration = line.split(':')[1].strip()
+                        break
+
+            os.remove(ralph_file)
+            cancelled_items.append(f"Ralph Loop (迭代 {iteration})")
+            logger.info(f"已删除 Ralph Loop 文件: {ralph_file}")
+        except Exception as e:
+            logger.error(f"删除 Ralph Loop 文件失败: {ralph_file}, 错误: {e}")
+
+    # 3. 终止正在运行的 claude 进程
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude.*-p"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                pid = pid.strip()
+                if pid and pid.isdigit():
+                    try:
+                        subprocess.run(["kill", pid], check=False)
+                        cancelled_items.append(f"Claude 进程 (PID {pid})")
+                        logger.info(f"已终止 Claude 进程: {pid}")
+                    except Exception as e:
+                        logger.error(f"终止进程失败: {pid}, 错误: {e}")
+    except Exception as e:
+        logger.error(f"查找 Claude 进程失败: {e}")
+
+    if not cancelled_items:
         await update.message.reply_text("ℹ️ 没有正在运行的任务")
         return
 
-    # 取消所有任务
-    cancelled_count = 0
-    for task in tasks:
-        await task_manager.cancel_task(user.id, task.session_id)
-        cancelled_count += 1
-
-    await update.message.reply_text(f"✅ 已取消 {cancelled_count} 个任务")
+    items_text = "\n".join([f"• {item}" for item in cancelled_items])
+    await update.message.reply_text(f"✅ 已取消:\n{items_text}")
 
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

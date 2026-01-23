@@ -303,7 +303,7 @@ class ClaudeExecutor:
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
             env=self.build_claude_env(),
-            limit=1024 * 1024  # 1MB 缓冲区限制
+            limit=16 * 1024 * 1024  # 16MB 缓冲区限制
         )
 
         # 创建任务
