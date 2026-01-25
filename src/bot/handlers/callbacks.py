@@ -125,6 +125,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("skill:"):
             await _handle_skill_callback(query, context, user_id, data)
 
+        # Cron 管理菜单
+        elif data == "cron_menu":
+            await _handle_cron_menu(query, user_id)
+
+        elif data == "cron_notify_toggle":
+            await _handle_cron_notify_toggle(query, user_id)
+
+        elif data.startswith("cron_notify_interval:"):
+            await _handle_cron_notify_interval(query, user_id, data)
+
+        elif data == "cron_notify_interval_menu":
+            await _handle_cron_notify_interval_menu(query, user_id)
+
+        elif data.startswith("cron_task_toggle:"):
+            await _handle_cron_task_toggle(query, user_id, data)
+
+        elif data.startswith("cron_task_delete:"):
+            await _handle_cron_task_delete(query, user_id, data)
+
+        elif data.startswith("cron_task_delete_confirm:"):
+            await _handle_cron_task_delete_confirm(query, user_id, data)
+
+        elif data.startswith("cron_task_schedule:"):
+            await _handle_cron_task_schedule_menu(query, user_id, data)
+
+        elif data.startswith("cron_task_set_schedule:"):
+            await _handle_cron_task_set_schedule(query, user_id, data)
+
+        elif data == "cron_tasks_list":
+            await _handle_cron_tasks_list(query, user_id)
+
         else:
             logger.warning(f"未知的回调数据: {data}")
 
@@ -748,6 +779,349 @@ async def _handle_skill_callback(query, context: ContextTypes.DEFAULT_TYPE, user
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='MarkdownV2'
     )
+
+
+# =====================================
+# Cron 管理回调处理
+# =====================================
+
+async def _handle_cron_menu(query, user_id: int):
+    """显示 Cron 管理主菜单"""
+    from ..services.cron_config import cron_config
+
+    notify_enabled = cron_config.is_notification_enabled()
+    notify_interval = cron_config.get_notification_interval()
+    cron_tasks = cron_config.get_cron_tasks()
+    pending_count = cron_config.get_pending_notifications_count()
+
+    # 构建状态信息
+    notify_status = "✅ 已开启" if notify_enabled else "❌ 已关闭"
+
+    text = f"""⏰ *定时任务管理*
+
+*Bot 通知*
+状态: {notify_status}
+检查间隔: 每 {notify_interval} 分钟
+待发送: {pending_count} 条
+
+*Cron 任务*
+已配置: {len(cron_tasks)} 个任务
+"""
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{'🔔' if notify_enabled else '🔕'} 通知开关",
+                callback_data="cron_notify_toggle"
+            ),
+            InlineKeyboardButton(
+                f"⏱️ 间隔 ({notify_interval}分)",
+                callback_data="cron_notify_interval_menu"
+            ),
+        ],
+        [InlineKeyboardButton("📋 任务列表", callback_data="cron_tasks_list")],
+    ]
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def _handle_cron_notify_toggle(query, user_id: int):
+    """切换通知开关"""
+    from ..services.cron_config import cron_config
+
+    current = cron_config.is_notification_enabled()
+    cron_config.set_notification_enabled(not current)
+
+    new_status = "✅ 已开启" if not current else "❌ 已关闭"
+
+    await query.answer(f"通知 {new_status}")
+
+    # 刷新菜单
+    await _handle_cron_menu(query, user_id)
+
+
+async def _handle_cron_notify_interval_menu(query, user_id: int):
+    """显示通知间隔选择菜单"""
+    from ..services.cron_config import cron_config
+
+    current_interval = cron_config.get_notification_interval()
+
+    text = f"""⏱️ *通知检查间隔*
+
+当前: 每 {current_interval} 分钟
+
+选择新的间隔:"""
+
+    intervals = [5, 10, 15, 30, 60, 120]
+    keyboard = []
+    row = []
+
+    for interval in intervals:
+        prefix = "✅ " if interval == current_interval else ""
+        label = f"{interval}分" if interval < 60 else f"{interval // 60}小时"
+        row.append(InlineKeyboardButton(
+            f"{prefix}{label}",
+            callback_data=f"cron_notify_interval:{interval}"
+        ))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="cron_menu")])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def _handle_cron_notify_interval(query, user_id: int, data: str):
+    """设置通知间隔"""
+    from ..services.cron_config import cron_config
+
+    interval = int(data.split(":")[1])
+    cron_config.set_notification_interval(interval)
+
+    await query.answer(f"已设置为每 {interval} 分钟")
+
+    # 返回主菜单
+    await _handle_cron_menu(query, user_id)
+
+
+async def _handle_cron_tasks_list(query, user_id: int):
+    """显示 Cron 任务列表"""
+    from ..services.cron_config import cron_config
+
+    tasks = cron_config.get_cron_tasks()
+
+    if not tasks:
+        text = """📋 *Cron 任务列表*
+
+暂无定时任务
+
+💡 使用 `/cron add` 添加任务"""
+
+        keyboard = [[InlineKeyboardButton("◀️ 返回", callback_data="cron_menu")]]
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    text = f"""📋 *Cron 任务列表*
+
+共 {len(tasks)} 个任务:
+"""
+
+    keyboard = []
+    for task in tasks:
+        line_num = task["line_num"]
+        description = task["description"]
+        task_id = task.get("task_id") or f"task_{line_num}"
+        enabled = task.get("enabled", True)
+
+        # 显示任务名称（从命令中提取）
+        command = task["command"]
+        if "check_trading" in command:
+            task_name = "Trading 检查"
+        elif "scripts/cron/" in command:
+            import re
+            match = re.search(r'scripts/cron/(\w+)\.sh', command)
+            task_name = match.group(1) if match else f"任务 {line_num}"
+        else:
+            task_name = f"任务 {line_num}"
+
+        status_icon = "✅" if enabled else "⏸️"
+
+        text += f"\n{status_icon} *{task_name}* \\- {description}"
+
+        # 任务操作按钮
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{'⏸️' if enabled else '▶️'} {task_name[:10]}",
+                callback_data=f"cron_task_toggle:{line_num}"
+            ),
+            InlineKeyboardButton("⏱️", callback_data=f"cron_task_schedule:{line_num}"),
+            InlineKeyboardButton("🗑️", callback_data=f"cron_task_delete:{line_num}"),
+        ])
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="cron_menu")])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def _handle_cron_task_toggle(query, user_id: int, data: str):
+    """切换任务开关（通过注释/取消注释实现）"""
+    from ..services.cron_config import cron_config
+
+    line_num = int(data.split(":")[1])
+    tasks = cron_config.get_cron_tasks()
+
+    # 找到对应任务
+    target_task = None
+    for task in tasks:
+        if task["line_num"] == line_num:
+            target_task = task
+            break
+
+    if not target_task:
+        await query.answer("任务不存在")
+        return
+
+    task_id = target_task.get("task_id") or f"task_{line_num}"
+    current_enabled = cron_config.is_task_enabled(task_id)
+
+    # 切换状态
+    cron_config.set_task_enabled(task_id, not current_enabled)
+
+    new_status = "已启用" if not current_enabled else "已暂停"
+    await query.answer(f"任务 {new_status}")
+
+    # 刷新任务列表
+    await _handle_cron_tasks_list(query, user_id)
+
+
+async def _handle_cron_task_delete(query, user_id: int, data: str):
+    """显示删除确认"""
+    from ..services.cron_config import cron_config
+
+    line_num = int(data.split(":")[1])
+    tasks = cron_config.get_cron_tasks()
+
+    # 找到对应任务
+    target_task = None
+    for task in tasks:
+        if task["line_num"] == line_num:
+            target_task = task
+            break
+
+    if not target_task:
+        await query.answer("任务不存在")
+        return
+
+    text = f"""⚠️ *确认删除任务?*
+
+执行周期: {target_task['description']}
+命令: `{target_task['command'][:50]}...`
+
+此操作不可恢复!"""
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ 确认删除", callback_data=f"cron_task_delete_confirm:{line_num}"),
+            InlineKeyboardButton("❌ 取消", callback_data="cron_tasks_list"),
+        ]
+    ]
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def _handle_cron_task_delete_confirm(query, user_id: int, data: str):
+    """确认删除任务"""
+    from ..services.cron_config import cron_config
+
+    line_num = int(data.split(":")[1])
+
+    success = cron_config.remove_cron_task(line_num)
+
+    if success:
+        await query.answer("✅ 任务已删除")
+    else:
+        await query.answer("❌ 删除失败")
+
+    # 返回任务列表
+    await _handle_cron_tasks_list(query, user_id)
+
+
+async def _handle_cron_task_schedule_menu(query, user_id: int, data: str):
+    """显示任务周期修改菜单"""
+    from ..services.cron_config import cron_config
+
+    line_num = int(data.split(":")[1])
+    tasks = cron_config.get_cron_tasks()
+
+    # 找到对应任务
+    target_task = None
+    for task in tasks:
+        if task["line_num"] == line_num:
+            target_task = task
+            break
+
+    if not target_task:
+        await query.answer("任务不存在")
+        return
+
+    text = f"""⏱️ *修改执行周期*
+
+当前: {target_task['description']}
+
+选择新的执行周期:"""
+
+    # 常用周期选项
+    schedules = [
+        ("每5分钟", "*/5 * * * *"),
+        ("每15分钟", "*/15 * * * *"),
+        ("每30分钟", "*/30 * * * *"),
+        ("每小时", "0 * * * *"),
+        ("每2小时", "0 */2 * * *"),
+        ("每天 00:00", "0 0 * * *"),
+        ("每天 08:00", "0 8 * * *"),
+        ("每天 12:00", "0 12 * * *"),
+    ]
+
+    keyboard = []
+    for label, cron_expr in schedules:
+        is_current = target_task["cron_expr"] == cron_expr
+        prefix = "✅ " if is_current else ""
+        keyboard.append([InlineKeyboardButton(
+            f"{prefix}{label}",
+            callback_data=f"cron_task_set_schedule:{line_num}:{cron_expr}"
+        )])
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="cron_tasks_list")])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def _handle_cron_task_set_schedule(query, user_id: int, data: str):
+    """设置任务执行周期"""
+    from ..services.cron_config import cron_config
+
+    parts = data.split(":", 2)
+    line_num = int(parts[1])
+    new_cron_expr = parts[2]
+
+    success = cron_config.update_cron_schedule(line_num, new_cron_expr)
+
+    if success:
+        await query.answer("✅ 执行周期已更新")
+    else:
+        await query.answer("❌ 更新失败")
+
+    # 返回任务列表
+    await _handle_cron_tasks_list(query, user_id)
 
 
 def get_callback_handlers():

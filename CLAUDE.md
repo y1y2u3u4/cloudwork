@@ -95,6 +95,35 @@ source config/.env && sshpass -p "$VPS_PASSWORD" scp -r src/* ${VPS_USER}@${VPS_
 WorkingDirectory=/home/claude/vps-cloud-runner/tasks/cloudwork
 EnvironmentFile=/home/claude/vps-cloud-runner/tasks/cloudwork/config/.env
 ExecStart=/usr/bin/python3 -m src.bot.main
+Restart=always
+RestartSec=10
+```
+
+### 重启 Bot 服务
+
+**方法 1: 使用 sudo（需要 root 权限）**
+```bash
+sudo systemctl restart claude-bot
+```
+
+**方法 2: Kill 进程让 systemd 自动重启（无需 sudo）**
+
+由于服务配置了 `Restart=always`，可以直接 kill 进程，systemd 会在 10 秒后自动重启：
+```bash
+# 查找并终止 Bot 进程
+kill $(pgrep -f "src.bot.main")
+
+# 等待 12 秒后检查新进程
+sleep 12 && ps aux | grep "src.bot.main" | grep -v grep
+```
+
+**验证重启成功**
+```bash
+# 检查进程启动时间（应该是最近）
+ps aux | grep "src.bot.main" | grep -v grep
+
+# 检查服务状态
+systemctl status claude-bot
 ```
 
 ### 本地测试

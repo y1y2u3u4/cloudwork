@@ -1,0 +1,7 @@
+{
+    "task": "system_test",
+    "status": "success",
+    "title": "CronNotifier 重启验证",
+    "message": "Bot 已成功重启\nCronNotifier 服务正在运行\n\n测试时间: 2026-01-24 20:32:17",
+    "created_at": "2026-01-24T20:32:17-05:00"
+}

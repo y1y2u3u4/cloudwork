@@ -18,6 +18,7 @@ from .handlers.commands import get_command_handlers
 from .handlers.messages import get_message_handlers
 from .handlers.callbacks import get_callback_handlers
 from .services.task import task_manager
+from .services.cron_notifier import init_cron_notifier, cron_notifier
 
 # 配置日志
 logging.basicConfig(
@@ -41,6 +42,7 @@ async def post_init(application: Application) -> None:
     # 设置 Bot 命令菜单
     from telegram import BotCommand
     commands = [
+        BotCommand("cron", "定时任务管理"),
         BotCommand("project", "切换项目"),
         BotCommand("clear", "清理会话上下文"),
         BotCommand("skills", "查看可用技能"),
@@ -48,7 +50,7 @@ async def post_init(application: Application) -> None:
         BotCommand("new", "创建新会话"),
         BotCommand("model", "切换模型"),
         BotCommand("mode", "切换执行模式"),
-        BotCommand("settings", "设置菜单"),
+        BotCommand("settings", "查看当前设置"),
         BotCommand("status", "查看运行状态"),
         BotCommand("cancel", "取消当前任务"),
         BotCommand("start", "开始使用 / 帮助信息"),
@@ -60,10 +62,22 @@ async def post_init(application: Application) -> None:
     except Exception as e:
         logger.warning(f"设置命令菜单失败: {e}")
 
+    # 启动 Cron 通知服务（监听 cron 任务输出并发送通知）
+    try:
+        notifier = init_cron_notifier(application.bot)
+        await notifier.start()
+        logger.info("Cron 通知服务已启动，监听 data/cron_outputs/ 目录")
+    except Exception as e:
+        logger.error(f"启动 Cron 通知服务失败: {e}", exc_info=True)
+
 
 async def post_shutdown(application: Application) -> None:
     """应用关闭前的回调"""
     logger.info("Bot 正在关闭...")
+
+    # 停止 Cron 通知服务
+    if cron_notifier:
+        await cron_notifier.stop()
 
     # 清理所有运行中的任务
     await task_manager.cleanup_all_tasks()

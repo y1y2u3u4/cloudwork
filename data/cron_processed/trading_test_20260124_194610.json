@@ -1,0 +1,7 @@
+{
+    "task": "trading_check",
+    "status": "success",
+    "title": "Freqtrade 回测完成 (测试)",
+    "message": "策略: TestStrategy\n总交易: 42 次\n总收益: 89.50 USDT (8.95%)\n胜率: 64.3% (27胜/15负)\n最大回撤: 6.20%",
+    "created_at": "2026-01-24T19:46:00-05:00"
+}

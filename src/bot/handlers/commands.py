@@ -44,6 +44,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /model 切换模型
 • /mode 切换执行模式
 • /project 切换项目
+• /cron 定时任务管理
 • /settings 查看当前设置
 
 当前模型: *{session_manager.get_user_model(user.id)}*
@@ -85,6 +86,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /model \\- 切换模型 \\(sonnet/opus/haiku\\)
 • /mode \\- 切换执行模式 \\(auto/plan\\)
 • /project \\- 切换工作项目
+
+*定时任务:*
+• /cron \\- 管理定时任务和通知
 
 *系统:*
 • /status \\- 系统状态
@@ -476,10 +480,61 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /model <名称> \\- 切换模型
 • /mode <模式> \\- 切换执行模式
 • /project <项目> \\- 切换项目
+• /cron \\- 定时任务管理
 """
 
     await update.message.reply_text(
         settings_text,
+        parse_mode='Markdown'
+    )
+
+
+async def cron_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """定时任务管理 - 一级入口"""
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    from ..services.cron_config import cron_config
+
+    notify_enabled = cron_config.is_notification_enabled()
+    notify_interval = cron_config.get_notification_interval()
+    cron_tasks = cron_config.get_cron_tasks()
+    pending_count = cron_config.get_pending_notifications_count()
+
+    # 构建状态信息
+    notify_status = "✅ 已开启" if notify_enabled else "❌ 已关闭"
+
+    text = f"""⏰ *定时任务管理*
+
+*Bot 通知*
+状态: {notify_status}
+检查间隔: 每 {notify_interval} 分钟
+待发送: {pending_count} 条
+
+*Cron 任务*
+已配置: {len(cron_tasks)} 个任务
+"""
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{'🔔' if notify_enabled else '🔕'} 通知开关",
+                callback_data="cron_notify_toggle"
+            ),
+            InlineKeyboardButton(
+                f"⏱️ 间隔 ({notify_interval}分)",
+                callback_data="cron_notify_interval_menu"
+            ),
+        ],
+        [InlineKeyboardButton("📋 任务列表", callback_data="cron_tasks_list")],
+    ]
+
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
@@ -888,6 +943,7 @@ def get_command_handlers():
         CommandHandler("mode", mode_command),
         CommandHandler("project", project_command),
         CommandHandler("settings", settings_command),
+        CommandHandler("cron", cron_command),
         CommandHandler("run", run_command),
         CommandHandler("status", status_command),
         CommandHandler("cancel", cancel_command),
