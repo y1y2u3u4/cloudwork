@@ -203,3 +203,9 @@ def func(x: Optional[str]) -> Tuple[str, str]:  # 不要用 str | None 或 tuple
 3. **项目特有知识**: 不在代码中明显体现但重要的上下文
 
 记录后，在上面的"读取记忆"列表中添加一行触发规则。
+
+### Recent Activity
+- **01-25**: 实现三层记忆系统、修复 tool_display bug、简化为 CLAUDE.md 索引方式
+- **01-26**: 分析 Freqtrade 策略回测、对比 ClawdBot 记忆方案
+
+→ 详情: `data/memory/daily/`
