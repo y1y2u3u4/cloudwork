@@ -19,6 +19,7 @@ from .handlers.messages import get_message_handlers
 from .handlers.callbacks import get_callback_handlers
 from .services.task import task_manager
 from .services.cron_notifier import init_cron_notifier, cron_notifier
+from .services.memory import init_memory
 
 # 配置日志
 logging.basicConfig(
@@ -132,6 +133,10 @@ def main():
     logger.info(f"Default mode: {settings.default_mode}")
     logger.info(f"Work directory: {settings.work_dir}")
     logger.info(f"Workspace directory: {settings.workspace_dir}")
+
+    # 初始化记忆系统
+    init_memory(settings.data_dir)
+    logger.info(f"Memory system initialized: {settings.data_dir}/memory")
 
     # 创建应用（启用并发更新处理，允许在任务执行时响应其他命令）
     application = (

@@ -13,6 +13,7 @@ from ...utils.auth import is_authorized
 from ...utils.formatters import escape_markdown, safe_truncate
 from ..services.session import session_manager
 from ..services.claude import claude_executor, AVAILABLE_MODELS, EXECUTION_MODES
+from ..services.memory import get_memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /model 切换模型
 • /mode 切换执行模式
 • /project 切换项目
+• /memory 记忆系统管理
 • /cron 定时任务管理
 • /settings 查看当前设置
 
@@ -86,6 +88,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /model \\- 切换模型 \\(sonnet/opus/haiku\\)
 • /mode \\- 切换执行模式 \\(auto/plan\\)
 • /project \\- 切换工作项目
+
+*记忆系统:*
+• /memory \\- 查看记忆状态
+• /memory learn \\- 提取学习模式
+• /memory save \\- 保存长期记忆
+• /memory search \\- 搜索记忆
 
 *定时任务:*
 • /cron \\- 管理定时任务和通知
@@ -925,6 +933,189 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================
+# 记忆系统命令
+# =====================================
+
+async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """记忆系统管理 - /memory [subcommand] [args]"""
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    memory_manager = get_memory_manager()
+    if not memory_manager:
+        await update.message.reply_text("❌ 记忆系统未初始化")
+        return
+
+    args = context.args
+
+    # 无参数: 显示状态
+    if not args:
+        status_text = memory_manager.format_status()
+        keyboard = [
+            [
+                InlineKeyboardButton("📖 学习模式", callback_data="memory:learn"),
+                InlineKeyboardButton("🔍 搜索", callback_data="memory:search"),
+            ],
+            [
+                InlineKeyboardButton("💾 保存记忆", callback_data="memory:save"),
+                InlineKeyboardButton("🔄 同步到CLAUDE.md", callback_data="memory:sync"),
+            ],
+        ]
+        await update.message.reply_text(
+            status_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    subcommand = args[0].lower()
+
+    # /memory learn [description] - 提取学习模式
+    if subcommand == "learn":
+        description = " ".join(args[1:]) if len(args) > 1 else None
+
+        if not description:
+            await update.message.reply_text(
+                "📖 *提取学习模式*\n\n"
+                "用法: `/memory learn <模式描述>`\n\n"
+                "示例:\n"
+                "• `/memory learn Python 3.9 类型注解兼容性`\n"
+                "• `/memory learn Freqtrade 策略热更新方法`",
+                parse_mode='Markdown'
+            )
+            return
+
+        # 触发 Claude 来提取模式（通过消息处理流程）
+        prompt = f"""请从当前会话中提取关于「{description}」的可复用模式，并保存到记忆系统。
+
+提取要求:
+1. 分析问题是什么
+2. 解决方案是什么
+3. 什么时候适用
+
+然后调用记忆保存功能，将模式保存到 data/memory/learned/ 目录。"""
+
+        from .messages import handle_message
+        context.user_data['override_prompt'] = prompt
+        await handle_message(update, context)
+        return
+
+    # /memory save <content> - 保存长期记忆
+    if subcommand == "save":
+        content = " ".join(args[1:]) if len(args) > 1 else None
+
+        if not content:
+            await update.message.reply_text(
+                "💾 *保存长期记忆*\n\n"
+                "用法: `/memory save <记忆内容>`\n\n"
+                "示例:\n"
+                "• `/memory save 用户偏好: 代码风格简洁`\n"
+                "• `/memory save 项目架构: Bot -> Claude CLI -> 会话管理`",
+                parse_mode='Markdown'
+            )
+            return
+
+        # 解析 section (如果内容包含冒号，使用冒号前的部分作为 section)
+        if ":" in content:
+            section, value = content.split(":", 1)
+            section = section.strip()
+            value = value.strip()
+        else:
+            section = "杂项"
+            value = content
+
+        memory_manager.append_memory(section, value)
+        await update.message.reply_text(
+            f"✅ 已保存到长期记忆\n\n"
+            f"分类: *{escape_markdown(section)}*\n"
+            f"内容: {escape_markdown(value)}",
+            parse_mode='Markdown'
+        )
+        return
+
+    # /memory search <keyword> - 搜索记忆
+    if subcommand == "search":
+        keyword = " ".join(args[1:]) if len(args) > 1 else None
+
+        if not keyword:
+            await update.message.reply_text(
+                "🔍 *搜索记忆*\n\n"
+                "用法: `/memory search <关键词>`\n\n"
+                "示例:\n"
+                "• `/memory search freqtrade`\n"
+                "• `/memory search 类型注解`",
+                parse_mode='Markdown'
+            )
+            return
+
+        results = memory_manager.search(keyword)
+
+        if not results:
+            await update.message.reply_text(f"🔍 未找到关于「{keyword}」的记忆")
+            return
+
+        # 格式化结果
+        text = f"🔍 搜索「{escape_markdown(keyword)}」的结果:\n\n"
+        for result in results[:5]:  # 最多显示 5 个文件
+            text += f"📄 *{escape_markdown(result['file'])}*\n"
+            for match in result['matches'][:3]:  # 每个文件最多 3 行
+                text += f"  L{match['line']}: {escape_markdown(match['text'][:60])}...\n"
+            text += "\n"
+
+        await update.message.reply_text(text, parse_mode='Markdown')
+        return
+
+    # /memory sync - 同步到 CLAUDE.md
+    if subcommand == "sync":
+        # 触发 Claude 来同步记忆到 CLAUDE.md
+        prompt = """请将记忆系统中的关键信息同步到项目的 CLAUDE.md 文件。
+
+同步策略:
+1. 读取 data/memory/MEMORY.md 中的用户偏好和项目知识
+2. 读取 data/memory/learned/ 中的高频使用模式
+3. 将核心信息整理后追加到 CLAUDE.md 的相应 section
+
+注意:
+- 只同步真正重要的、会频繁使用的信息
+- 避免重复（检查 CLAUDE.md 中是否已存在）
+- 保持 CLAUDE.md 的简洁性"""
+
+        from .messages import handle_message
+        context.user_data['override_prompt'] = prompt
+        await handle_message(update, context)
+        return
+
+    # /memory index - 更新索引
+    if subcommand == "index":
+        memory_manager._update_index()
+        await update.message.reply_text("✅ 已更新记忆索引")
+        return
+
+    # /memory archive - 归档旧记忆
+    if subcommand == "archive":
+        archived = memory_manager.archive_old_daily()
+        await update.message.reply_text(f"✅ 已归档 {archived} 个旧的每日记忆文件")
+        return
+
+    # 未知子命令
+    await update.message.reply_text(
+        "❓ 未知的子命令\n\n"
+        "可用命令:\n"
+        "• `/memory` - 查看状态\n"
+        "• `/memory learn <描述>` - 提取学习模式\n"
+        "• `/memory save <内容>` - 保存长期记忆\n"
+        "• `/memory search <关键词>` - 搜索记忆\n"
+        "• `/memory sync` - 同步到 CLAUDE.md\n"
+        "• `/memory index` - 更新索引\n"
+        "• `/memory archive` - 归档旧记忆",
+        parse_mode='Markdown'
+    )
+
+
+# =====================================
 # 命令注册辅助函数
 # =====================================
 
@@ -953,4 +1144,6 @@ def get_command_handlers():
         CommandHandler("plan", plan_command),
         CommandHandler("ralph", ralph_command),
         CommandHandler("cancel_ralph", cancel_ralph_command),
+        # 记忆系统
+        CommandHandler("memory", memory_command),
     ]
