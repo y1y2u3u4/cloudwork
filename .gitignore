@@ -87,3 +87,12 @@ htmlcov/
 *.pyo
 *.pyd
 .cache/
+
+# =====================================
+# Desktop (Tauri + React)
+# =====================================
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/.vite/
+desktop/pnpm-lock.yaml
