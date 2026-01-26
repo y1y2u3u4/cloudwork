@@ -43,6 +43,7 @@ async def post_init(application: Application) -> None:
     # 设置 Bot 命令菜单
     from telegram import BotCommand
     commands = [
+        BotCommand("memory", "记忆系统管理"),
         BotCommand("cron", "定时任务管理"),
         BotCommand("project", "切换项目"),
         BotCommand("clear", "清理会话上下文"),

@@ -74,37 +74,25 @@ class MemoryManager:
         else:
             # 创建新的每日文件
             date_obj = date or datetime.now()
-            existing = f"# {date_obj.strftime('%Y-%m-%d')} 会话记录\n\n"
+            existing = f"# {date_obj.strftime('%Y-%m-%d')} 会话记录\n"
 
         # 查找或创建 section
         section_header = f"## {section}"
         if section_header in existing:
-            # 在 section 末尾追加
-            lines = existing.split('\n')
-            result = []
-            in_section = False
-            added = False
+            # 使用正则在 section 末尾追加
+            import re
+            # 匹配 section header 到下一个 ## 或文件末尾
+            pattern = f"({re.escape(section_header)}.*?)(\n## |$)"
 
-            for i, line in enumerate(lines):
-                result.append(line)
-                if line.startswith(section_header):
-                    in_section = True
-                elif in_section and line.startswith('## '):
-                    # 新 section 开始，在这之前插入
-                    if not added:
-                        result.insert(-1, f"- {content}")
-                        result.insert(-1, "")
-                        added = True
-                    in_section = False
+            def replacer(match):
+                section_content = match.group(1).rstrip()
+                next_section = match.group(2)
+                return f"{section_content}\n- {content}\n{next_section}"
 
-            if in_section and not added:
-                # section 在文件末尾
-                result.append(f"- {content}")
-
-            existing = '\n'.join(result)
+            existing = re.sub(pattern, replacer, existing, count=1, flags=re.DOTALL)
         else:
             # 创建新 section
-            existing += f"\n{section_header}\n- {content}\n"
+            existing = existing.rstrip() + f"\n\n{section_header}\n- {content}\n"
 
         filepath.write_text(existing, encoding='utf-8')
         logger.info(f"Appended to daily memory: {section}")
