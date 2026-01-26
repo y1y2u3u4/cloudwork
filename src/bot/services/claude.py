@@ -16,7 +16,6 @@ from ...utils.config import settings
 from .task import TaskState, RunningTask, task_manager
 from .session import session_manager
 from .tool_display import tool_formatter
-from .memory import get_memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -292,22 +291,8 @@ class ClaudeExecutor:
         if not work_dir:
             work_dir = self.get_user_project_dir(user_id)
 
-        # 注入记忆系统上下文（仅新会话时注入，避免重复）
-        enhanced_prompt = prompt
-        if not session_id or session_id.startswith("pending_"):
-            memory_manager = get_memory_manager()
-            if memory_manager:
-                session_context = memory_manager.get_session_context()
-                if session_context:
-                    enhanced_prompt = f"""<memory-context>
-{session_context}
-</memory-context>
-
-{prompt}"""
-                    logger.info(f"注入记忆上下文: {len(session_context)} 字符")
-
-        # 构建命令
-        cmd = self.build_command(enhanced_prompt, session_id, model, execution_mode)
+        # 构建命令（记忆系统改用 CLAUDE.md 索引方式，Claude 原生读取）
+        cmd = self.build_command(prompt, session_id, model, execution_mode)
         logger.info(f"流式执行命令 (model={model}): {' '.join(cmd[:5])}...")
 
         # 创建子进程（增大缓冲区限制以处理大文件输出）
@@ -583,25 +568,11 @@ class ClaudeExecutor:
         if not work_dir:
             work_dir = self.get_user_project_dir(user_id)
 
-        # 注入记忆系统上下文（仅新会话时注入）
-        enhanced_prompt = prompt
-        if not session_id:
-            memory_manager = get_memory_manager()
-            if memory_manager:
-                session_context = memory_manager.get_session_context()
-                if session_context:
-                    enhanced_prompt = f"""<memory-context>
-{session_context}
-</memory-context>
-
-{prompt}"""
-                    logger.info(f"[sync] 注入记忆上下文: {len(session_context)} 字符")
-
-        # 构建命令
+        # 构建命令（记忆系统改用 CLAUDE.md 索引方式）
         if session_id:
-            cmd = ['claude', '--resume', session_id, '-p', enhanced_prompt]
+            cmd = ['claude', '--resume', session_id, '-p', prompt]
         else:
-            cmd = ['claude', '-p', enhanced_prompt, '--output-format', 'json']
+            cmd = ['claude', '-p', prompt, '--output-format', 'json']
         cmd.append('--dangerously-skip-permissions')
         cmd.extend(['--model', model])
 

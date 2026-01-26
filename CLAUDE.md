@@ -185,3 +185,21 @@ VPS 运行 Python 3.9，类型注解需使用：
 from typing import Optional, Tuple
 def func(x: Optional[str]) -> Tuple[str, str]:  # 不要用 str | None 或 tuple[str, str]
 ```
+
+## Memory System
+
+### 读取记忆
+遇到以下场景时，先读取对应文件：
+
+- **Python 类型注解** → `data/memory/learned/python-3-9-类型注解兼容性.md`
+- **工具显示问题** → `data/memory/learned/tool-display-周期性更新覆盖问题.md`
+- **记忆系统设计** → `data/memory/learned/markdown-记忆系统-vs-向量数据库.md`
+
+### 写入记忆
+当发现以下情况时，主动记录：
+
+1. **Bug 修复经验**: 创建 `data/memory/learned/<问题简述>.md`，包含问题、原因、解决方案
+2. **技术决策**: 记录为什么选择某个方案而不是另一个
+3. **项目特有知识**: 不在代码中明显体现但重要的上下文
+
+记录后，在上面的"读取记忆"列表中添加一行触发规则。
