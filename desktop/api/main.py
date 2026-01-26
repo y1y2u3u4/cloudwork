@@ -566,4 +566,6 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("API_PORT", "2026"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # 默认只绑定 localhost，VPS 部署时应使用 Cloudflare Tunnel
+    host = os.environ.get("API_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port)
