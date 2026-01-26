@@ -219,15 +219,63 @@ class MemoryManager:
         self.memory_file.write_text(content, encoding='utf-8')
         logger.info("Saved long-term memory")
 
-    def append_memory(self, section: str, content: str):
-        """追加到长期记忆的指定 section"""
+    def _is_similar_content(self, existing_text: str, new_content: str, threshold: float = 0.6) -> bool:
+        """检查新内容是否与已有内容相似（字符级别的重叠检测）"""
+        import re
+
+        def normalize(text):
+            # 去除标点和空格，只保留中文、英文、数字
+            return re.sub(r'[^\u4e00-\u9fff a-zA-Z0-9]', '', text.lower())
+
+        def get_ngrams(text, n=2):
+            """获取 n-gram 集合（用于中文的字符级别匹配）"""
+            text = normalize(text)
+            if len(text) < n:
+                return {text} if text else set()
+            return set(text[i:i+n] for i in range(len(text) - n + 1))
+
+        new_ngrams = get_ngrams(new_content)
+        if not new_ngrams:
+            return False
+
+        # 检查已有内容的每一行
+        for line in existing_text.split('\n'):
+            if line.strip().startswith('- '):
+                # 提取记忆条目内容（去除时间戳）
+                line_content = re.sub(r'\[\d{2}-\d{2}\]', '', line)
+                line_content = re.sub(r'\[\d{4}-\d{2}-\d{2}.*?\]', '', line_content)
+                line_ngrams = get_ngrams(line_content)
+                if not line_ngrams:
+                    continue
+                # 计算 n-gram 重叠率
+                overlap = len(new_ngrams & line_ngrams) / len(new_ngrams)
+                if overlap >= threshold:
+                    return True
+        return False
+
+    def append_memory(self, section: str, content: str, check_duplicate: bool = True) -> bool:
+        """追加到长期记忆的指定 section
+
+        Args:
+            section: 分类名称
+            content: 记忆内容
+            check_duplicate: 是否检查重复（默认 True）
+
+        Returns:
+            bool: 是否成功添加（如果重复则返回 False）
+        """
         existing = self.load_memory()
 
         if not existing:
             existing = "# 长期记忆\n\n"
 
+        # P1 改进: 去重检查
+        if check_duplicate and self._is_similar_content(existing, content):
+            logger.info(f"Skipped duplicate memory: {content[:50]}...")
+            return False
+
         section_header = f"## {section}"
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        timestamp = datetime.now().strftime("%m-%d")  # P2 改进: 简化时间戳
         entry = f"- [{timestamp}] {content}"
 
         if section_header in existing:
@@ -252,6 +300,7 @@ class MemoryManager:
 
         self.save_memory(existing)
         logger.info(f"Appended to memory section: {section}")
+        return True
 
     # ============ 索引管理 ============
 
@@ -305,7 +354,7 @@ class MemoryManager:
     # ============ 搜索功能 ============
 
     def search(self, keyword: str) -> List[Dict[str, Any]]:
-        """搜索所有记忆文件"""
+        """搜索所有记忆文件，按匹配数降序排列"""
         results = []
         keyword_lower = keyword.lower()
 
@@ -334,20 +383,51 @@ class MemoryManager:
 
                     results.append({
                         "file": str(filepath.relative_to(self.memory_dir)),
-                        "matches": matches[:5]  # 每个文件最多 5 个匹配
+                        "matches": matches[:5],  # 每个文件最多 5 个匹配
+                        "match_count": len(matches)  # 总匹配数用于排序
                     })
             except Exception as e:
                 logger.error(f"Error searching {filepath}: {e}")
 
+        # P1 改进: 按匹配数降序排列
+        results.sort(key=lambda x: x["match_count"], reverse=True)
         return results
 
     # ============ 会话集成 ============
+
+    def get_learned_summaries(self, max_count: int = 3) -> str:
+        """获取最近的 learned 模式摘要"""
+        patterns = self.list_learned()[:max_count]
+        if not patterns:
+            return ""
+
+        summaries = []
+        for p in patterns:
+            try:
+                content = Path(p["path"]).read_text(encoding='utf-8')
+                # 提取前 200 字符作为摘要
+                lines = content.split('\n')
+                # 跳过标题和元数据，取实际内容
+                summary_lines = []
+                for line in lines:
+                    if line.startswith('#') or line.startswith('**'):
+                        continue
+                    if line.strip():
+                        summary_lines.append(line.strip())
+                    if len('\n'.join(summary_lines)) > 150:
+                        break
+                summary = '\n'.join(summary_lines)[:150]
+                summaries.append(f"**{p['title']}**: {summary}...")
+            except Exception as e:
+                logger.error(f"Error reading learned pattern {p['path']}: {e}")
+
+        return '\n\n'.join(summaries)
 
     def get_session_context(self) -> str:
         """
         获取会话开始时需要加载的上下文
 
-        返回: MEMORY.md + 今天/昨天的 daily + index 摘要
+        返回: MEMORY.md + 今天/昨天的 daily + learned 摘要 + index
         """
         context_parts = []
 
@@ -360,6 +440,11 @@ class MemoryManager:
         recent = self.get_recent_daily(days=2)
         if recent:
             context_parts.append("=== 近期会话 ===\n" + recent)
+
+        # P2 改进: 加载最近的 learned 模式摘要
+        learned_summaries = self.get_learned_summaries(max_count=3)
+        if learned_summaries:
+            context_parts.append("=== 可用技术模式 ===\n" + learned_summaries)
 
         # 索引摘要
         index = self.load_index()
