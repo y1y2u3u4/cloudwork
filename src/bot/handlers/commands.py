@@ -1100,6 +1100,31 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 已归档 {archived} 个旧的每日记忆文件")
         return
 
+    # /memory forget [--confirm] - 遗忘低价值记忆
+    if subcommand == "forget":
+        confirm = "--confirm" in args or "-y" in args
+
+        if not confirm:
+            # 预览模式
+            preview = memory_manager.get_forget_preview(threshold=25.0)
+            await update.message.reply_text(
+                f"🧹 *记忆遗忘预览*\n\n{preview}",
+                parse_mode='Markdown'
+            )
+            return
+
+        # 执行遗忘
+        deleted = memory_manager.forget(auto=True, threshold=25.0, dry_run=False)
+
+        if deleted:
+            await update.message.reply_text(
+                f"🧹 已遗忘 {len(deleted)} 个低价值记忆:\n" +
+                "\n".join([f"• {d.split('/')[-1]}" for d in deleted])
+            )
+        else:
+            await update.message.reply_text("没有需要遗忘的低价值记忆")
+        return
+
     # 未知子命令
     await update.message.reply_text(
         "❓ 未知的子命令\n\n"
@@ -1110,7 +1135,8 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/memory search <关键词>` - 搜索记忆\n"
         "• `/memory sync` - 同步到 CLAUDE.md\n"
         "• `/memory index` - 更新索引\n"
-        "• `/memory archive` - 归档旧记忆",
+        "• `/memory archive` - 归档旧记忆\n"
+        "• `/memory forget` - 遗忘低价值记忆",
         parse_mode='Markdown'
     )
 

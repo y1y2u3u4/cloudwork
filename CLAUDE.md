@@ -205,8 +205,26 @@ def func(x: Optional[str]) -> Tuple[str, str]:  # 不要用 str | None 或 tuple
 
 记录后，在上面的"读取记忆"列表中添加一行触发规则。
 
+### 持续学习 (v2 新增)
+系统会自动从会话中提取可复用的模式：
+- **error_resolution**: 错误解决方案
+- **user_correction**: 用户纠正
+- **workaround**: 变通方案
+- **debugging_technique**: 调试技巧
+- **project_specific**: 项目特定知识
+
+使用 `/memory learn <描述>` 触发手动提取。
+
+### 记忆遗忘 (v2 新增)
+使用 `/memory forget` 预览低价值记忆，`/memory forget --confirm` 执行清理。
+
+评分规则（100分制，<25分可遗忘）：
+- 时间因素 (0-40): 7天内满分，半年以上5分
+- 大小因素 (0-30): 500-2000字节最佳
+- 质量因素 (0-30): 有标题、代码块、技术关键词加分
+
 ### Recent Activity
 - **01-25**: 实现三层记忆系统、修复 tool_display bug、简化为 CLAUDE.md 索引方式
-- **01-26**: 分析 Freqtrade 策略回测、对比 ClawdBot 记忆方案
+- **01-26**: 分析 Freqtrade 策略回测、对比 ClawdBot 记忆方案、实现持续学习和遗忘机制
 
 → 详情: `data/memory/daily/`
