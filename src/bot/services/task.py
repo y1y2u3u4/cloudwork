@@ -33,6 +33,7 @@ class RunningTask:
     state: str = TaskState.RUNNING
     accumulated_text: str = ""
     current_tool: Optional[str] = None
+    current_tool_display: Optional[str] = None  # 格式化后的工具调用显示
     tool_call_count: int = 0  # 工具调用计数器，用于区分连续相同工具调用
     pending_question: Optional[str] = None
     last_update_time: float = field(default_factory=time.time)

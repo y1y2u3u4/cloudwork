@@ -126,6 +126,20 @@ ps aux | grep "src.bot.main" | grep -v grep
 systemctl status claude-bot
 ```
 
+### Git Push（从 VPS 推送到 GitHub）
+
+VPS 使用 SSH 方式推送代码到 GitHub：
+
+```bash
+# 远程仓库配置（已配置）
+git remote set-url origin git@github.com:y1y2u3u4/cloudwork.git
+
+# 推送代码
+git add -A && git commit -m "描述" && git push origin main
+```
+
+**SSH 密钥：** VPS 的 SSH 公钥 (`~/.ssh/id_ed25519.pub`) 已添加到 GitHub Deploy Keys。
+
 ### 本地测试
 ```bash
 # 需要先设置环境变量

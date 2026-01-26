@@ -15,6 +15,7 @@ from typing import Optional, Tuple, Dict, Any, Callable, Awaitable
 from ...utils.config import settings
 from .task import TaskState, RunningTask, task_manager
 from .session import session_manager
+from .tool_display import tool_formatter
 
 logger = logging.getLogger(__name__)
 
@@ -485,12 +486,17 @@ class ClaudeExecutor:
 
                 elif block_type == "tool_use":
                     tool_name = block.get("name", "unknown")
+                    tool_input = block.get("input", {})
                     task.current_tool = tool_name
                     task.tool_call_count += 1  # 递增工具调用计数
-                    logger.info(f"工具调用: {tool_name} (第 {task.tool_call_count} 次)")
+
+                    # 格式化工具调用详情
+                    tool_display = tool_formatter.format(tool_name, tool_input)
+                    task.current_tool_display = f"{tool_display} ({task.tool_call_count})"
+                    logger.info(f"工具调用: {tool_display} (第 {task.tool_call_count} 次)")
                     await progress_callback(
                         task.accumulated_text,
-                        f"🔧 正在使用工具: {tool_name} ({task.tool_call_count})"
+                        task.current_tool_display
                     )
 
                     # 处理 AskUserQuestion
@@ -505,6 +511,7 @@ class ClaudeExecutor:
             for block in content:
                 if block.get("type") == "tool_result":
                     task.current_tool = None
+                    task.current_tool_display = None
 
         # 处理 result 事件
         elif event_type == "result":
@@ -534,7 +541,7 @@ class ClaudeExecutor:
         # 定期更新进度
         current_time = time.time()
         if current_time - task.last_update_time >= MESSAGE_UPDATE_INTERVAL:
-            status = f"🔧 正在执行: {task.current_tool} ({task.tool_call_count})" if task.current_tool else None
+            status = task.current_tool_display if task.current_tool_display else None
             await progress_callback(task.accumulated_text, status)
             task.last_update_time = current_time
 
