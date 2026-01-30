@@ -436,10 +436,16 @@ async def safe_edit_message(
     安全地编辑消息，处理各种错误情况
 
     自动处理：
+    - 空文本（跳过编辑）
     - 消息未修改
     - Markdown 解析错误（回退到纯文本）
     - 消息过长
     """
+    # 检查空文本，避免 Telegram API 报错
+    if not text or not text.strip():
+        logger.debug("跳过编辑：文本为空")
+        return
+
     try:
         await message.edit_text(
             text,

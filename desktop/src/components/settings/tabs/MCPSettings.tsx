@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { getMcpConfigPath } from '@/shared/lib/paths';
 import { cn } from '@/shared/lib/utils';
 import { useLanguage } from '@/shared/providers/language-provider';
 import { FolderOpen, Loader2, Plus, Settings, Trash2, X } from 'lucide-react';
@@ -20,6 +19,8 @@ export function MCPSettings({ settings, onSettingsChange }: SettingsTabProps) {
   const [showAddServer, setShowAddServer] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [claudeDir, setClaudeDir] = useState<string>('');
+  const [executionTarget, setExecutionTarget] = useState<string>('local');
   const [newServer, setNewServer] = useState<MCPServerUI>({
     id: '',
     name: '',
@@ -67,6 +68,14 @@ export function MCPSettings({ settings, onSettingsChange }: SettingsTabProps) {
 
         if (!result.success) {
           throw new Error(result.error || 'Failed to load config');
+        }
+
+        // 保存配置目录和执行目标
+        if (result.claude_dir) {
+          setClaudeDir(result.claude_dir);
+        }
+        if (result.target) {
+          setExecutionTarget(result.target);
         }
 
         const serverList: MCPServerUI[] = [];
@@ -468,6 +477,22 @@ export function MCPSettings({ settings, onSettingsChange }: SettingsTabProps) {
                 </p>
               </div>
 
+              {/* 执行环境信息 */}
+              <div className="bg-muted/50 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className={cn(
+                    "size-2 rounded-full",
+                    executionTarget === 'vps' ? "bg-orange-500" : "bg-emerald-500"
+                  )} />
+                  <span className="text-foreground text-sm font-medium">
+                    {executionTarget === 'vps' ? 'VPS Environment' : 'Local Environment'}
+                  </span>
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  Config directory: <code className="bg-background px-1.5 py-0.5 rounded">{claudeDir || '~/.claude'}</code>
+                </p>
+              </div>
+
               <div className="flex items-center justify-between">
                 <div>
                   <label className="text-foreground text-sm font-medium">
@@ -497,26 +522,11 @@ export function MCPSettings({ settings, onSettingsChange }: SettingsTabProps) {
                     <FolderOpen className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
                     <input
                       type="text"
-                      value={settings.mcpConfigPath}
-                      onChange={(e) =>
-                        onSettingsChange({
-                          ...settings,
-                          mcpConfigPath: e.target.value,
-                        })
-                      }
-                      placeholder="~/.workany/mcp.json"
-                      className="border-input bg-background text-foreground placeholder:text-muted-foreground focus:ring-ring h-10 w-full rounded-lg border pr-3 pl-10 text-sm focus:border-transparent focus:ring-2 focus:outline-none"
+                      value={claudeDir ? `${claudeDir}/settings.json` : settings.mcpConfigPath}
+                      readOnly
+                      className="border-input bg-muted/30 text-foreground placeholder:text-muted-foreground h-10 w-full cursor-not-allowed rounded-lg border pr-3 pl-10 text-sm"
                     />
                   </div>
-                  <button
-                    onClick={async () => {
-                      const path = await getMcpConfigPath();
-                      onSettingsChange({ ...settings, mcpConfigPath: path });
-                    }}
-                    className="text-muted-foreground hover:text-foreground border-border hover:bg-accent h-10 cursor-pointer rounded-lg border px-3 text-sm transition-colors"
-                  >
-                    {t.common.reset}
-                  </button>
                 </div>
               </div>
             </div>

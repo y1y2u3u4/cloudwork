@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { API_BASE_URL } from '@/config';
 import type { MessageAttachment } from '@/shared/hooks/useAgent';
 import { cn } from '@/shared/lib/utils';
 import { useLanguage } from '@/shared/providers/language-provider';
@@ -15,8 +16,13 @@ import {
   Paperclip,
   Plus,
   Send,
+  Sparkles,
   Square,
   X,
+  Zap,
+  Rocket,
+  Monitor,
+  Cloud,
 } from 'lucide-react';
 
 import {
@@ -87,6 +93,23 @@ const createImagePreview = (file: File): Promise<string> => {
   });
 };
 
+// Model configuration
+type ModelId = 'sonnet' | 'opus' | 'haiku';
+
+const MODEL_CONFIG: Record<ModelId, { name: string; icon: typeof Sparkles; color: string }> = {
+  sonnet: { name: 'Sonnet', icon: Sparkles, color: 'text-blue-500' },
+  opus: { name: 'Opus', icon: Rocket, color: 'text-purple-500' },
+  haiku: { name: 'Haiku', icon: Zap, color: 'text-green-500' },
+};
+
+// Execution target configuration
+type TargetId = 'local' | 'vps';
+
+const TARGET_CONFIG: Record<TargetId, { name: string; icon: typeof Monitor; color: string }> = {
+  local: { name: 'Local', icon: Monitor, color: 'text-emerald-500' },
+  vps: { name: 'VPS', icon: Cloud, color: 'text-orange-500' },
+};
+
 export function ChatInput({
   placeholder = 'Type a message...',
   isRunning = false,
@@ -100,10 +123,55 @@ export function ChatInput({
   const { t } = useLanguage();
   const [value, setValue] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [currentModel, setCurrentModel] = useState<ModelId>('sonnet');
+  const [currentTarget, setCurrentTarget] = useState<TargetId>('local');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   const prevIsRunningRef = useRef(isRunning);
+
+  // Load settings from API on mount
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/settings`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.model && data.model in MODEL_CONFIG) {
+          setCurrentModel(data.model as ModelId);
+        }
+        if (data.target && data.target in TARGET_CONFIG) {
+          setCurrentTarget(data.target as TargetId);
+        }
+      })
+      .catch(err => console.error('[ChatInput] Failed to load settings:', err));
+  }, []);
+
+  // Change model
+  const handleModelChange = async (model: ModelId) => {
+    setCurrentModel(model);
+    try {
+      await fetch(`${API_BASE_URL}/api/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      });
+    } catch (err) {
+      console.error('[ChatInput] Failed to save model:', err);
+    }
+  };
+
+  // Change execution target
+  const handleTargetChange = async (target: TargetId) => {
+    setCurrentTarget(target);
+    try {
+      await fetch(`${API_BASE_URL}/api/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target }),
+      });
+    } catch (err) {
+      console.error('[ChatInput] Failed to save target:', err);
+    }
+  };
 
   // Auto focus on mount if autoFocus is true
   useEffect(() => {
@@ -393,8 +461,9 @@ export function ChatInput({
           isHome ? 'mt-3' : 'mt-2'
         )}
       >
-        {/* Add Button with Dropdown */}
+        {/* Left: Add Button + Model Selector */}
         <div className="flex items-center gap-1">
+          {/* Add Button with Dropdown */}
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger
               disabled={isRunning || disabled}
@@ -419,6 +488,98 @@ export function ChatInput({
                 <Paperclip className="size-4" />
                 <span>{t.home.addFilesOrPhotos}</span>
               </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* Model Selector */}
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger
+              disabled={isRunning || disabled}
+              className={cn(
+                'flex items-center gap-1.5 transition-colors focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+                isHome
+                  ? 'border-border bg-background hover:bg-accent text-sm px-3 h-8 rounded-full border'
+                  : 'text-muted-foreground hover:bg-accent hover:text-foreground text-xs px-2 h-7 rounded-md'
+              )}
+            >
+              {(() => {
+                const config = MODEL_CONFIG[currentModel];
+                const Icon = config.icon;
+                return (
+                  <>
+                    <Icon className={cn('size-3.5', config.color)} />
+                    <span className="text-foreground/80">{config.name}</span>
+                  </>
+                );
+              })()}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              sideOffset={8}
+              className="z-50 w-44"
+            >
+              {(Object.entries(MODEL_CONFIG) as [ModelId, typeof MODEL_CONFIG[ModelId]][]).map(([id, config]) => {
+                const Icon = config.icon;
+                return (
+                  <DropdownMenuItem
+                    key={id}
+                    onSelect={() => handleModelChange(id)}
+                    className={cn(
+                      'cursor-pointer gap-2.5 py-2',
+                      currentModel === id && 'bg-accent'
+                    )}
+                  >
+                    <Icon className={cn('size-4', config.color)} />
+                    <span>{config.name}</span>
+                  </DropdownMenuItem>
+                );
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* Execution Target Selector */}
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger
+              disabled={isRunning || disabled}
+              className={cn(
+                'flex items-center gap-1.5 transition-colors focus:outline-none disabled:cursor-not-allowed disabled:opacity-50',
+                isHome
+                  ? 'border-border bg-background hover:bg-accent text-sm px-3 h-8 rounded-full border'
+                  : 'text-muted-foreground hover:bg-accent hover:text-foreground text-xs px-2 h-7 rounded-md'
+              )}
+            >
+              {(() => {
+                const config = TARGET_CONFIG[currentTarget];
+                const Icon = config.icon;
+                return (
+                  <>
+                    <Icon className={cn('size-3.5', config.color)} />
+                    <span className="text-foreground/80">{config.name}</span>
+                  </>
+                );
+              })()}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              sideOffset={8}
+              className="z-50 w-44"
+            >
+              {(Object.entries(TARGET_CONFIG) as [TargetId, typeof TARGET_CONFIG[TargetId]][]).map(([id, config]) => {
+                const Icon = config.icon;
+                return (
+                  <DropdownMenuItem
+                    key={id}
+                    onSelect={() => handleTargetChange(id)}
+                    className={cn(
+                      'cursor-pointer gap-2.5 py-2',
+                      currentTarget === id && 'bg-accent'
+                    )}
+                  >
+                    <Icon className={cn('size-4', config.color)} />
+                    <span>{config.name}</span>
+                  </DropdownMenuItem>
+                );
+              })}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>

@@ -156,6 +156,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "cron_tasks_list":
             await _handle_cron_tasks_list(query, user_id)
 
+        # 执行目标切换
+        elif data.startswith("set_target:"):
+            await _handle_set_target(query, user_id, data)
+
+        # SEO 关键词挖掘
+        elif data.startswith("seo:"):
+            await _handle_seo_callback(query, context, user_id, data)
+
         else:
             logger.warning(f"未知的回调数据: {data}")
 
@@ -832,13 +840,21 @@ async def _handle_cron_menu(query, user_id: int):
 async def _handle_cron_notify_toggle(query, user_id: int):
     """切换通知开关"""
     from ..services.cron_config import cron_config
+    from ..services.cron_notifier import cron_notifier
 
     current = cron_config.is_notification_enabled()
     cron_config.set_notification_enabled(not current)
 
     new_status = "✅ 已开启" if not current else "❌ 已关闭"
 
-    await query.answer(f"通知 {new_status}")
+    # 如果从关闭变为开启，立即发送积压的消息
+    if not current and cron_notifier:
+        # 在后台立即处理待发送消息
+        import asyncio
+        asyncio.create_task(cron_notifier._process_pending_outputs())
+        await query.answer(f"通知 {new_status}，正在发送积压消息...")
+    else:
+        await query.answer(f"通知 {new_status}")
 
     # 刷新菜单
     await _handle_cron_menu(query, user_id)
@@ -1122,6 +1138,208 @@ async def _handle_cron_task_set_schedule(query, user_id: int, data: str):
 
     # 返回任务列表
     await _handle_cron_tasks_list(query, user_id)
+
+
+async def _handle_set_target(query, user_id: int, data: str):
+    """处理执行目标切换"""
+    target = data.split(":", 1)[1]
+
+    if target == "vps":
+        session_manager.set_execution_target(user_id, "vps")
+        await query.edit_message_text(
+            "🖥️ 已切换到 *VPS 执行*\n\n任务将在 VPS 本地 Claude CLI 执行",
+            parse_mode='Markdown'
+        )
+
+    elif target == "local":
+        # 切换到本地节点（需要已有 URL 配置）
+        current_url = session_manager.get_local_node_url(user_id)
+        if current_url:
+            session_manager.set_execution_target(user_id, "local")
+            await query.edit_message_text(
+                f"💻 已切换到 *本地节点执行*\n\n"
+                f"节点地址: `{current_url}`",
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                "❌ 请先设置本地节点 URL\n\n"
+                "用法: `/target local http://100.x.x.x:2026`",
+                parse_mode='Markdown'
+            )
+
+    elif target == "local_setup":
+        # 提示用户设置本地节点
+        await query.edit_message_text(
+            "💻 *设置本地节点*\n\n"
+            "请使用命令设置本地节点 URL:\n"
+            "`/target local http://100.x.x.x:2026`\n\n"
+            "可选设置认证 Token:\n"
+            "`/target token <YOUR_TOKEN>`",
+            parse_mode='Markdown'
+        )
+
+    else:
+        await query.edit_message_text(f"❌ 无效目标: {target}")
+
+
+# =====================================
+# SEO 关键词挖掘回调处理
+# =====================================
+
+async def _handle_seo_callback(query, context, user_id: int, data: str):
+    """处理 SEO 关键词挖掘回调"""
+    from ..services.skills import keyword_mining_manager
+    from .messages import handle_message
+
+    parts = data.split(":")
+    if len(parts) < 2:
+        await query.edit_message_text("⚠️ 无效的操作")
+        return
+
+    action = parts[1]
+
+    # 查看历史报告
+    if action == "report":
+        if not keyword_mining_manager:
+            await query.edit_message_text("❌ 关键词挖掘服务未初始化")
+            return
+
+        project_dir = claude_executor.get_user_project_dir(user_id)
+        status = keyword_mining_manager.get_mining_status(project_dir)
+
+        if not status or not status.get('reports'):
+            await query.edit_message_text(
+                "📭 暂无历史报告\n\n使用 `/seo <领域>` 开始挖掘",
+                parse_mode='Markdown'
+            )
+            return
+
+        text = "📊 *历史挖掘报告*\n\n"
+        for report in status['reports'][:10]:
+            text += f"• `{report['filename']}` ({report['modified']})\n"
+
+        keyboard = [[InlineKeyboardButton("◀️ 返回", callback_data="seo:menu")]]
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    # 返回主菜单
+    if action == "menu":
+        keyboard = [
+            [
+                InlineKeyboardButton("🎬 AI Video", callback_data="seo:video"),
+                InlineKeyboardButton("🖼️ AI Image", callback_data="seo:image"),
+            ],
+            [
+                InlineKeyboardButton("🤖 AI Agent", callback_data="seo:agent"),
+                InlineKeyboardButton("✍️ AI Writing", callback_data="seo:writing"),
+            ],
+            [
+                InlineKeyboardButton("💻 AI Code", callback_data="seo:code"),
+                InlineKeyboardButton("📊 历史报告", callback_data="seo:report"),
+            ],
+        ]
+
+        await query.edit_message_text(
+            "🔍 *SEO 关键词挖掘*\n\n"
+            "*快捷挖掘:* 点击下方按钮\n\n"
+            "*自定义挖掘:*\n"
+            "`/seo <领域描述>`",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    # 各方向的挖掘配置
+    direction_config = {
+        "video": {
+            "niche": "AI Tools",
+            "direction": "video",
+            "prompt": "挖掘 AI 视频生成工具相关的关键词机会，包括 text-to-video、image-to-video、视频编辑、Sora 替代品等方向"
+        },
+        "image": {
+            "niche": "AI Tools",
+            "direction": "image",
+            "prompt": "挖掘 AI 图片生成工具相关的关键词机会，包括 text-to-image、图片编辑、Midjourney 替代品、AI 艺术生成等方向"
+        },
+        "agent": {
+            "niche": "AI Tools",
+            "direction": "agent",
+            "prompt": "挖掘 AI Agent 工具相关的关键词机会，包括自动化工作流、AutoGPT 替代品、AI 助手、agentic AI 等方向"
+        },
+        "writing": {
+            "niche": "AI Tools",
+            "direction": "writing",
+            "prompt": "挖掘 AI 写作工具相关的关键词机会，包括 AI 文案、博客生成、Jasper 替代品、内容创作工具等方向"
+        },
+        "code": {
+            "niche": "AI Tools",
+            "direction": "code",
+            "prompt": "挖掘 AI 编程工具相关的关键词机会，包括代码生成、GitHub Copilot 替代品、AI 代码助手等方向"
+        }
+    }
+
+    if action not in direction_config:
+        await query.edit_message_text(f"⚠️ 未知的挖掘方向: {action}")
+        return
+
+    config = direction_config[action]
+
+    # 更新消息显示进行中状态
+    await query.edit_message_text(
+        f"🔍 *正在挖掘 {action.upper()} 方向关键词...*\n\n"
+        "请稍候，这可能需要一些时间...",
+        parse_mode='Markdown'
+    )
+
+    # 构建挖掘 prompt
+    if not keyword_mining_manager:
+        await query.message.reply_text("❌ 关键词挖掘服务未初始化")
+        return
+
+    mining_prompt = keyword_mining_manager.build_mining_prompt(
+        user_prompt=config["prompt"],
+        niche=config["niche"],
+        direction=config["direction"]
+    )
+
+    # 通过消息处理流程执行
+    # 创建一个模拟的 update 对象来触发消息处理
+    context.user_data['override_prompt'] = mining_prompt
+
+    # 发送新消息触发处理
+    await query.message.reply_text(
+        f"🚀 开始挖掘 *{action.upper()}* 方向关键词...",
+        parse_mode='Markdown'
+    )
+
+    # 实际执行需要通过消息处理器
+    # 这里我们直接调用 claude_executor
+    from ..services.claude import claude_executor
+
+    try:
+        output, _ = claude_executor.execute_sync(
+            prompt=mining_prompt,
+            session_id=None,
+            user_id=user_id
+        )
+
+        # 分段发送结果（避免消息过长）
+        from ...utils.formatters import safe_truncate
+        output = safe_truncate(output, 4000)
+
+        await query.message.reply_text(
+            f"✅ *{action.upper()} 关键词挖掘完成*\n\n{output}",
+            parse_mode=None  # 使用纯文本避免解析问题
+        )
+
+    except Exception as e:
+        logger.error(f"关键词挖掘失败: {e}")
+        await query.message.reply_text(f"❌ 挖掘失败: {str(e)[:200]}")
 
 
 def get_callback_handlers():

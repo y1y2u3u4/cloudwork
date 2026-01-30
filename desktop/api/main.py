@@ -15,9 +15,11 @@ import sys
 import time
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import aiohttp
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # 将 cloudwork 根目录加入 path，复用现有模块
 cloudwork_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -48,6 +50,49 @@ init_memory(data_dir)
 
 # 默认用户 ID (桌面端单用户)
 DESKTOP_USER_ID = int(os.environ.get("DESKTOP_USER_ID", "0"))
+
+# =================== 认证 ===================
+# 简单 Token 认证，用于远程访问保护
+
+# 从环境变量读取 API Token (必须设置才能启用远程访问)
+API_TOKEN = os.environ.get("CLOUDWORK_API_TOKEN", "")
+# 是否强制认证 (默认关闭，本地开发无需认证)
+REQUIRE_AUTH = os.environ.get("CLOUDWORK_REQUIRE_AUTH", "false").lower() == "true"
+
+# VPS API 配置 (通过 Tailscale 内网访问)
+VPS_API_URL = os.environ.get("VPS_API_URL", "http://100.96.65.52:2026")
+VPS_API_TOKEN = os.environ.get("VPS_API_TOKEN", "")
+
+security = HTTPBearer(auto_error=False)
+
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """验证 Bearer Token"""
+    # 如果未启用强制认证，直接放行
+    if not REQUIRE_AUTH:
+        return True
+
+    # 启用认证但未配置 Token，拒绝所有请求
+    if not API_TOKEN:
+        raise HTTPException(status_code=500, detail="API Token not configured")
+
+    # 验证 Token
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+
+    if credentials.credentials != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    return True
+
+
+def verify_ws_token(token: Optional[str]) -> bool:
+    """验证 WebSocket Token"""
+    if not REQUIRE_AUTH:
+        return True
+    if not API_TOKEN:
+        return False
+    return token == API_TOKEN
 
 
 # =================== Health ===================
@@ -104,6 +149,55 @@ async def list_archived():
 _active_processes: Dict[str, Any] = {}
 
 
+def _make_vps_sse_stream(prompt: str, session_id: Optional[str], model: str, mode: str):
+    """转发请求到 VPS API 并返回 SSE 流"""
+
+    async def event_stream():
+        # 发送心跳
+        yield ": keepalive\n\n"
+
+        headers = {"Content-Type": "application/json"}
+        if VPS_API_TOKEN:
+            headers["Authorization"] = f"Bearer {VPS_API_TOKEN}"
+
+        payload = {
+            "prompt": prompt,
+            "session_id": session_id,
+            "model": model,
+            "mode": mode,
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=600)  # 10 分钟超时
+            async with aiohttp.ClientSession(timeout=timeout) as http_session:
+                async with http_session.post(
+                    f"{VPS_API_URL}/api/agent/run",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'VPS API error: {response.status} - {error_text}'})}\n\n"
+                        return
+
+                    # 转发 SSE 流
+                    async for line in response.content:
+                        line_text = line.decode('utf-8', errors='replace')
+                        if line_text.strip():
+                            yield line_text
+                            if not line_text.endswith('\n'):
+                                yield '\n'
+
+        except aiohttp.ClientError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'VPS connection error: {str(e)}'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'VPS error: {str(e)}'})}\n\n"
+
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    return event_stream()
+
+
 def _make_claude_sse_stream(prompt: str, session_id: Optional[str], model: str, mode: str):
     """创建 Claude CLI SSE 流 - 兼容 WorkAny 前端消息格式"""
 
@@ -115,6 +209,9 @@ def _make_claude_sse_stream(prompt: str, session_id: Optional[str], model: str, 
 
         work_dir = claude_executor.get_user_project_dir(DESKTOP_USER_ID)
         cmd = claude_executor.build_command(prompt, active_id, model, mode)
+
+        # 立即发送心跳，防止连接被判定为断开
+        yield ": keepalive\n\n"
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -136,12 +233,17 @@ def _make_claude_sse_stream(prompt: str, session_id: Optional[str], model: str, 
         try:
             while True:
                 try:
+                    # 每 5 秒超时一次，发送心跳保持连接
                     line_bytes = await asyncio.wait_for(
-                        process.stdout.readline(), timeout=300
+                        process.stdout.readline(), timeout=5
                     )
                 except asyncio.TimeoutError:
-                    yield f"data: {json.dumps({'type': 'error', 'content': 'Timeout'})}\n\n"
-                    break
+                    # 进程还在运行则发送心跳，否则退出
+                    if process.returncode is None:
+                        yield ": keepalive\n\n"
+                        continue
+                    else:
+                        break
 
                 if not line_bytes:
                     break
@@ -210,9 +312,18 @@ def _sse_response(stream):
     )
 
 
+def _get_stream(prompt: str, session_id: Optional[str], model: str, mode: str):
+    """根据执行目标返回对应的 SSE 流"""
+    target = session_manager.get_execution_target(DESKTOP_USER_ID)
+    if target == "vps":
+        return _make_vps_sse_stream(prompt, session_id, model, mode)
+    else:
+        return _make_claude_sse_stream(prompt, session_id, model, mode)
+
+
 # WorkAny 兼容端点: POST /agent (直接执行)
 @app.post("/agent")
-async def agent_direct(data: Dict[str, Any]):
+async def agent_direct(data: Dict[str, Any], _: bool = Depends(verify_token)):
     """直接执行 - 兼容 WorkAny useAgent.ts"""
     prompt = data.get("prompt", "")
     model_config = data.get("modelConfig") or {}
@@ -223,13 +334,13 @@ async def agent_direct(data: Dict[str, Any]):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
-    stream = _make_claude_sse_stream(prompt, None, model, "auto")
+    stream = _get_stream(prompt, None, model, "auto")
     return _sse_response(stream)
 
 
 # WorkAny 兼容端点: POST /agent/plan (生成计划)
 @app.post("/agent/plan")
-async def agent_plan(data: Dict[str, Any]):
+async def agent_plan(data: Dict[str, Any], _: bool = Depends(verify_token)):
     """规划模式 - 使用 Claude plan mode"""
     prompt = data.get("prompt", "")
     model_config = data.get("modelConfig") or {}
@@ -240,13 +351,13 @@ async def agent_plan(data: Dict[str, Any]):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
-    stream = _make_claude_sse_stream(prompt, None, model, "plan")
+    stream = _get_stream(prompt, None, model, "plan")
     return _sse_response(stream)
 
 
 # WorkAny 兼容端点: POST /agent/execute (执行已批准计划)
 @app.post("/agent/execute")
-async def agent_execute(data: Dict[str, Any]):
+async def agent_execute(data: Dict[str, Any], _: bool = Depends(verify_token)):
     """执行计划 - 实际上 CloudWork 直接用 auto 模式"""
     prompt = data.get("prompt", "")
     model_config = data.get("modelConfig") or {}
@@ -257,7 +368,7 @@ async def agent_execute(data: Dict[str, Any]):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
-    stream = _make_claude_sse_stream(prompt, None, model, "auto")
+    stream = _get_stream(prompt, None, model, "auto")
     return _sse_response(stream)
 
 
@@ -283,7 +394,7 @@ async def agent_permission(data: Dict[str, Any]):
 
 # CloudWork 自有端点
 @app.post("/api/agent/run")
-async def agent_run(data: Dict[str, Any]):
+async def agent_run(data: Dict[str, Any], _: bool = Depends(verify_token)):
     """CloudWork 原生执行端点"""
     prompt = data.get("prompt", "")
     session_id = data.get("session_id")
@@ -293,7 +404,7 @@ async def agent_run(data: Dict[str, Any]):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
-    stream = _make_claude_sse_stream(prompt, session_id, model, mode)
+    stream = _get_stream(prompt, session_id, model, mode)
     return _sse_response(stream)
 
 
@@ -393,13 +504,201 @@ async def files_skills_dir():
 
 # =================== MCP 兼容端点 ===================
 
+# Claude 配置目录
+LOCAL_CLAUDE_DIR = os.path.expanduser("~/.claude")
+VPS_CLAUDE_DIR = "/home/claude/.claude"
+
+def get_local_mcp_config():
+    """读取本地 MCP 配置（从 settings.json）"""
+    settings_path = os.path.join(LOCAL_CLAUDE_DIR, "settings.json")
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    return {}
+
+def get_local_mcp_servers():
+    """收集本地所有 MCP 服务器配置"""
+    servers = {}
+
+    # 1. 从插件缓存目录收集 MCP 服务器
+    plugins_cache = os.path.join(LOCAL_CLAUDE_DIR, "plugins", "cache")
+    if os.path.exists(plugins_cache):
+        for org_dir in os.listdir(plugins_cache):
+            org_path = os.path.join(plugins_cache, org_dir)
+            if not os.path.isdir(org_path):
+                continue
+            for plugin_dir in os.listdir(org_path):
+                plugin_path = os.path.join(org_path, plugin_dir)
+                if not os.path.isdir(plugin_path):
+                    continue
+                # 遍历版本目录
+                for version_dir in os.listdir(plugin_path):
+                    version_path = os.path.join(plugin_path, version_dir)
+                    if not os.path.isdir(version_path):
+                        continue
+                    # 查找 .mcp.json 文件
+                    mcp_json = os.path.join(version_path, ".mcp.json")
+                    if os.path.exists(mcp_json):
+                        try:
+                            with open(mcp_json, 'r') as f:
+                                mcp_config = json.load(f)
+                                # 处理两种格式
+                                if "mcpServers" in mcp_config:
+                                    servers.update(mcp_config["mcpServers"])
+                                else:
+                                    servers.update(mcp_config)
+                        except:
+                            pass
+
+    # 2. 从 marketplaces 外部插件目录收集 MCP 服务器
+    marketplaces_dir = os.path.join(LOCAL_CLAUDE_DIR, "plugins", "marketplaces")
+    if os.path.exists(marketplaces_dir):
+        for marketplace in os.listdir(marketplaces_dir):
+            external_plugins = os.path.join(marketplaces_dir, marketplace, "external_plugins")
+            if not os.path.exists(external_plugins):
+                continue
+            for plugin_name in os.listdir(external_plugins):
+                plugin_path = os.path.join(external_plugins, plugin_name)
+                if not os.path.isdir(plugin_path):
+                    continue
+                mcp_json = os.path.join(plugin_path, ".mcp.json")
+                if os.path.exists(mcp_json):
+                    try:
+                        with open(mcp_json, 'r') as f:
+                            mcp_config = json.load(f)
+                            # 处理两种格式: {"mcpServers": {...}} 或直接 {"server_name": {...}}
+                            if "mcpServers" in mcp_config:
+                                servers.update(mcp_config["mcpServers"])
+                            else:
+                                servers.update(mcp_config)
+                    except:
+                        pass
+
+    # 3. 从 mcp-servers 目录收集自定义 MCP 服务器
+    mcp_servers_dir = os.path.join(LOCAL_CLAUDE_DIR, "mcp-servers")
+    if os.path.exists(mcp_servers_dir):
+        for server_name in os.listdir(mcp_servers_dir):
+            server_path = os.path.join(mcp_servers_dir, server_name)
+            if not os.path.isdir(server_path):
+                continue
+            # 跳过隐藏文件和非目录
+            if server_name.startswith('.'):
+                continue
+            # 检查是否有 server.py（Python MCP 服务器）
+            if os.path.exists(os.path.join(server_path, "server.py")):
+                servers[server_name] = {
+                    "command": "python",
+                    "args": [os.path.join(server_path, "server.py")]
+                }
+            # 检查是否有 dist/index.js（编译后的 TypeScript）
+            elif os.path.exists(os.path.join(server_path, "dist", "index.js")):
+                servers[server_name] = {
+                    "command": "node",
+                    "args": [os.path.join(server_path, "dist", "index.js")]
+                }
+            # 检查是否有 index.js（Node MCP 服务器）
+            elif os.path.exists(os.path.join(server_path, "index.js")):
+                servers[server_name] = {
+                    "command": "node",
+                    "args": [os.path.join(server_path, "index.js")]
+                }
+
+    return servers
+
+def get_local_skills():
+    """读取本地 Skills 列表"""
+    skills_dir = os.path.join(LOCAL_CLAUDE_DIR, "commands")
+    skills = []
+    if os.path.exists(skills_dir):
+        for f in os.listdir(skills_dir):
+            if f.endswith('.md'):
+                skills.append({
+                    "name": f.replace('.md', ''),
+                    "path": os.path.join(skills_dir, f)
+                })
+    return skills
+
+async def get_vps_claude_config():
+    """从 VPS 获取 Claude 配置"""
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            headers = {}
+            if VPS_API_TOKEN:
+                headers["Authorization"] = f"Bearer {VPS_API_TOKEN}"
+            async with session.get(f"{VPS_API_URL}/api/claude-config", headers=headers) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except:
+        pass
+    return {"mcp": {}, "skills": [], "claude_dir": VPS_CLAUDE_DIR}
+
+@app.get("/api/claude-config")
+async def get_claude_config():
+    """获取当前环境的 Claude 配置（MCP、Skills 等）"""
+    target = session_manager.get_execution_target(DESKTOP_USER_ID)
+
+    if target == "vps":
+        # 从 VPS 获取配置
+        vps_config = await get_vps_claude_config()
+        return {
+            "target": "vps",
+            "claude_dir": VPS_CLAUDE_DIR,
+            "mcp": vps_config.get("mcp", {}),
+            "skills": vps_config.get("skills", []),
+        }
+    else:
+        # 返回本地配置
+        return {
+            "target": "local",
+            "claude_dir": LOCAL_CLAUDE_DIR,
+            "mcp": get_local_mcp_config(),
+            "skills": get_local_skills(),
+        }
+
 @app.get("/mcp/all-configs")
 async def mcp_all_configs():
-    """MCP 配置 - CloudWork 暂无 MCP"""
-    return {"configs": []}
+    """MCP 配置 - 返回前端期望的格式"""
+    target = session_manager.get_execution_target(DESKTOP_USER_ID)
+
+    if target == "vps":
+        # 从 VPS 获取 MCP 配置
+        vps_config = await get_vps_claude_config()
+        mcp_servers = vps_config.get("mcp_servers", {})
+        claude_dir = VPS_CLAUDE_DIR
+    else:
+        # 获取本地 MCP 服务器
+        mcp_servers = get_local_mcp_servers()
+        claude_dir = LOCAL_CLAUDE_DIR
+
+    # 前端期望的格式
+    configs = [
+        {
+            "name": "claude",
+            "path": os.path.join(claude_dir, "settings.json"),
+            "exists": True,
+            "servers": mcp_servers
+        }
+    ]
+
+    return {
+        "success": True,
+        "configs": configs,
+        "target": target,
+        "claude_dir": claude_dir
+    }
 
 
 # =================== Settings ===================
+
+# 执行环境配置
+EXECUTION_TARGETS = {
+    "local": "本地环境",
+    "vps": "VPS (Bot)",
+}
 
 @app.get("/api/settings")
 async def get_settings():
@@ -408,8 +707,11 @@ async def get_settings():
         "model": session_manager.get_user_model(DESKTOP_USER_ID),
         "mode": session_manager.get_user_execution_mode(DESKTOP_USER_ID),
         "project": session_manager.get_user_project(DESKTOP_USER_ID),
+        "target": session_manager.get_execution_target(DESKTOP_USER_ID),
+        "local_node_url": session_manager.get_local_node_url(DESKTOP_USER_ID),
         "available_models": AVAILABLE_MODELS,
         "available_modes": EXECUTION_MODES,
+        "available_targets": EXECUTION_TARGETS,
         "projects": list(claude_executor.projects.keys()),
     }
 
@@ -423,6 +725,8 @@ async def update_settings(data: Dict[str, Any]):
         session_manager.set_user_execution_mode(DESKTOP_USER_ID, data["mode"])
     if "project" in data:
         session_manager.set_user_project(DESKTOP_USER_ID, data["project"])
+    if "target" in data:
+        session_manager.set_execution_target(DESKTOP_USER_ID, data["target"])
     return {"status": "ok"}
 
 
@@ -498,14 +802,21 @@ async def list_projects():
 # =================== WebSocket (实时通信) ===================
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
     """
     WebSocket 端点，用于实时双向通信
 
     消息格式:
     { "type": "ping" } → { "type": "pong" }
     { "type": "run", "prompt": "..." } → 流式结果
+
+    认证: 通过 query param ?token=xxx 传递
     """
+    # 验证 Token
+    if not verify_ws_token(token):
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
     await websocket.accept()
 
     try:

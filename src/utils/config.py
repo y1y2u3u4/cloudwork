@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     default_model: str = "sonnet"
     default_mode: str = "auto"
     command_timeout: int = 300
+    claude_binary: str = "claude"  # 本地 Mac 可设为完整路径
 
     # =====================================
     # Storage

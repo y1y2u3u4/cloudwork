@@ -141,8 +141,8 @@ else:
 # === 策略统计 ===
 trade_count = profit.get('trade_count', 0)
 closed_count = profit.get('closed_trade_count', 0)
-winrate = profit.get('winrate', 0)
-max_dd = profit.get('max_drawdown', 0)
+winrate = profit.get('winrate', 0) * 100  # API 返回 0~1 比例，转为百分比
+max_dd = profit.get('max_drawdown', 0) * 100  # 同上
 
 stats = []
 if closed_count > 0:

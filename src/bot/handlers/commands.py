@@ -378,6 +378,123 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    切换执行目标 (VPS 或本地节点)
+
+    用法:
+    - /target              查看当前目标
+    - /target vps          切换到 VPS 执行
+    - /target local <URL>  切换到本地节点，URL 为 Desktop API 地址
+    - /target local        切换到本地节点（使用已保存的 URL）
+    - /target token <TOKEN> 设置本地节点 API Token
+    - /target token        清除 Token
+    """
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    args = context.args
+    current_target = session_manager.get_execution_target(user.id)
+    current_url = session_manager.get_local_node_url(user.id)
+    current_token = session_manager.get_local_node_token(user.id)
+
+    if not args:
+        # 显示当前状态和切换按钮
+        status_emoji = "🖥️" if current_target == "vps" else "💻"
+        url_info = f"\n本地节点: `{current_url}`" if current_url else ""
+        token_info = "\nAPI Token: ✅ 已设置" if current_token else ""
+
+        # 构建按钮
+        buttons = []
+        if current_target == "vps":
+            # 当前是 VPS，显示切换到 Local 的按钮
+            if current_url:
+                buttons.append([InlineKeyboardButton("💻 切换到本地节点", callback_data="set_target:local")])
+            else:
+                buttons.append([InlineKeyboardButton("💻 设置本地节点", callback_data="set_target:local_setup")])
+        else:
+            # 当前是 Local，显示切换到 VPS 的按钮
+            buttons.append([InlineKeyboardButton("🖥️ 切换到 VPS", callback_data="set_target:vps")])
+
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        await update.message.reply_text(
+            f"{status_emoji} *执行目标*\n\n"
+            f"当前: *{current_target.upper()}*{url_info}{token_info}\n\n"
+            f"_点击按钮切换，或使用命令:_\n"
+            f"`/target local <URL>` 设置本地节点\n"
+            f"`/target token <TOKEN>` 设置认证",
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+        return
+
+    new_target = args[0].lower()
+
+    if new_target == "vps":
+        session_manager.set_execution_target(user.id, "vps")
+        await update.message.reply_text(
+            "🖥️ 已切换到 *VPS 执行*\n\n任务将在 VPS 本地 Claude CLI 执行",
+            parse_mode='Markdown'
+        )
+
+    elif new_target == "local":
+        # 检查是否提供了 URL
+        if len(args) > 1:
+            new_url = args[1]
+            # 简单校验 URL 格式
+            if not new_url.startswith("http"):
+                new_url = f"http://{new_url}"
+            session_manager.set_local_node_url(user.id, new_url)
+            session_manager.set_execution_target(user.id, "local")
+            await update.message.reply_text(
+                f"💻 已切换到 *本地节点执行*\n\n"
+                f"节点地址: `{new_url}`\n\n"
+                f"请确保本地已运行 Desktop API 且 Tailscale 已连接",
+                parse_mode='Markdown'
+            )
+        elif current_url:
+            # 使用已保存的 URL
+            session_manager.set_execution_target(user.id, "local")
+            await update.message.reply_text(
+                f"💻 已切换到 *本地节点执行*\n\n"
+                f"节点地址: `{current_url}`",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "❌ 请提供本地节点 URL\n\n"
+                "用法: `/target local http://100.x.x.x:2026`",
+                parse_mode='Markdown'
+            )
+
+    elif new_target == "token":
+        # 设置或清除 API Token
+        if len(args) > 1:
+            new_token = args[1]
+            session_manager.set_local_node_token(user.id, new_token)
+            await update.message.reply_text(
+                "🔑 *API Token 已设置*\n\n"
+                "本地节点请求将使用此 Token 进行认证",
+                parse_mode='Markdown'
+            )
+        else:
+            session_manager.set_local_node_token(user.id, None)
+            await update.message.reply_text(
+                "🔑 *API Token 已清除*",
+                parse_mode='Markdown'
+            )
+
+    else:
+        await update.message.reply_text(
+            f"❌ 无效目标: {new_target}\n\n可用: `vps`, `local`, `token`",
+            parse_mode='Markdown'
+        )
+
+
 async def project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """切换或查看当前项目（层级浏览）"""
     logger.info(f"收到 /project 命令: user={update.effective_user.id if update.effective_user else 'unknown'}")
@@ -664,15 +781,34 @@ async def ralph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     completion_promise = "COMPLETE"
     prompt_parts = []
 
-    # 预处理：合并单独的 "-" 或 "--" 与后续 token
+    # 预处理第一步：拆分粘连的参数
+    # 例如: "2。-max" -> ["2。", "-max"]
+    # 例如: "文字-promise" -> ["文字", "-promise"]
+    import re
+    split_args = []
+    param_pattern = re.compile(r'(-{1,2}(?:max|promise|completion|max-iterations|completion-promise))\b', re.IGNORECASE)
+    for arg in args:
+        # 检查是否有粘连的参数标记
+        match = param_pattern.search(arg)
+        if match and match.start() > 0:
+            # 有粘连，拆分
+            prefix = arg[:match.start()]
+            suffix = arg[match.start():]
+            if prefix:
+                split_args.append(prefix)
+            split_args.append(suffix)
+        else:
+            split_args.append(arg)
+
+    # 预处理第二步：合并单独的 "-" 或 "--" 与后续 token
     # 例如: ["-", "max", "10"] -> ["-max", "10"]
     processed_args = []
     i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg in ("-", "--") and i + 1 < len(args):
+    while i < len(split_args):
+        arg = split_args[i]
+        if arg in ("-", "--") and i + 1 < len(split_args):
             # 合并 "-" 或 "--" 与下一个 token
-            next_arg = args[i + 1]
+            next_arg = split_args[i + 1]
             if not next_arg.startswith("-"):
                 processed_args.append(f"{arg}{next_arg}")
                 i += 2
@@ -1142,6 +1278,113 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================
+# SEO 关键词挖掘命令
+# =====================================
+
+async def seo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    SEO 关键词挖掘技能
+
+    用法:
+    - /seo                     查看帮助和状态
+    - /seo <领域> [方向]        执行关键词挖掘
+    - /seo video               AI 视频方向挖掘
+    - /seo image               AI 图片方向挖掘
+    - /seo agent               AI Agent 方向挖掘
+    - /seo report              查看历史报告
+    """
+    user = update.effective_user
+
+    if not is_authorized(user.id):
+        await update.message.reply_text("⛔ 未授权用户")
+        return
+
+    args = context.args
+
+    # 无参数: 显示帮助和快捷按钮
+    if not args:
+        keyboard = [
+            [
+                InlineKeyboardButton("🎬 AI Video", callback_data="seo:video"),
+                InlineKeyboardButton("🖼️ AI Image", callback_data="seo:image"),
+            ],
+            [
+                InlineKeyboardButton("🤖 AI Agent", callback_data="seo:agent"),
+                InlineKeyboardButton("✍️ AI Writing", callback_data="seo:writing"),
+            ],
+            [
+                InlineKeyboardButton("💻 AI Code", callback_data="seo:code"),
+                InlineKeyboardButton("📊 历史报告", callback_data="seo:report"),
+            ],
+        ]
+
+        await update.message.reply_text(
+            "🔍 *SEO 关键词挖掘*\n\n"
+            "*快捷挖掘:* 点击下方按钮\n\n"
+            "*自定义挖掘:*\n"
+            "`/seo <领域描述>`\n\n"
+            "*示例:*\n"
+            "• `/seo ai video generator`\n"
+            "• `/seo midjourney alternatives`\n"
+            "• `/seo ai agent tools 2025`\n\n"
+            "*挖掘流程:*\n"
+            "1️⃣ 种子词扩展 (修饰词矩阵)\n"
+            "2️⃣ SERP 分析 (竞争度评估)\n"
+            "3️⃣ 机会评分 (蓝海词识别)\n"
+            "4️⃣ 内容规划 (优先级建议)",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    # /seo report - 查看历史报告
+    if args[0].lower() == "report":
+        from ..services.skills import keyword_mining_manager
+        if not keyword_mining_manager:
+            await update.message.reply_text("❌ 关键词挖掘服务未初始化")
+            return
+
+        project_dir = claude_executor.get_user_project_dir(user.id)
+        status = keyword_mining_manager.get_mining_status(project_dir)
+
+        if not status or not status.get('reports'):
+            await update.message.reply_text("📭 暂无历史报告\n\n使用 `/seo <领域>` 开始挖掘", parse_mode='Markdown')
+            return
+
+        text = "📊 *历史挖掘报告*\n\n"
+        for report in status['reports'][:10]:
+            text += f"• `{report['filename']}` ({report['modified']})\n"
+
+        await update.message.reply_text(text, parse_mode='Markdown')
+        return
+
+    # 执行关键词挖掘
+    user_prompt = " ".join(args)
+
+    # 导入并使用 keyword_mining_manager
+    from ..services.skills import keyword_mining_manager
+    if not keyword_mining_manager:
+        await update.message.reply_text("❌ 关键词挖掘服务未初始化")
+        return
+
+    # 解析 niche 和 direction
+    niche, direction = keyword_mining_manager.parse_niche_from_prompt(user_prompt)
+
+    # 构建挖掘 prompt
+    mining_prompt = keyword_mining_manager.build_mining_prompt(
+        user_prompt=user_prompt,
+        niche=niche,
+        direction=direction
+    )
+
+    # 通过消息处理流程执行
+    from .messages import handle_message
+    context.user_data['override_prompt'] = mining_prompt
+
+    await handle_message(update, context)
+
+
+# =====================================
 # 命令注册辅助函数
 # =====================================
 
@@ -1158,6 +1401,7 @@ def get_command_handlers():
         CommandHandler("delete", delete_session),
         CommandHandler("model", model_command),
         CommandHandler("mode", mode_command),
+        CommandHandler("target", target_command),  # 执行目标切换
         CommandHandler("project", project_command),
         CommandHandler("settings", settings_command),
         CommandHandler("cron", cron_command),
@@ -1172,4 +1416,7 @@ def get_command_handlers():
         CommandHandler("cancel_ralph", cancel_ralph_command),
         # 记忆系统
         CommandHandler("memory", memory_command),
+        # 关键词挖掘
+        CommandHandler("seo", seo_command),
+        CommandHandler("keywords", seo_command),  # 别名
     ]

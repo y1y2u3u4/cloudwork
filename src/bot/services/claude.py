@@ -225,10 +225,12 @@ class ClaudeExecutor:
             self.is_valid_uuid(session_id)
         )
 
+        claude_bin = settings.claude_binary
+
         if is_valid_session:
             cmd = [
                 'unbuffer',
-                'claude', '--resume', session_id,
+                claude_bin, '--resume', session_id,
                 '-p', prompt,
                 '--model', model,
                 '--output-format', 'stream-json',
@@ -237,7 +239,7 @@ class ClaudeExecutor:
         else:
             cmd = [
                 'unbuffer',
-                'claude',
+                claude_bin,
                 '-p', prompt,
                 '--model', model,
                 '--output-format', 'stream-json',
@@ -283,6 +285,22 @@ class ClaudeExecutor:
         Returns:
             (output, new_session_id)
         """
+        # 检查执行目标
+        execution_target = session_manager.get_execution_target(user_id)
+
+        if execution_target == "local":
+            # 代理到本地节点执行
+            return await self._execute_via_local_node(
+                prompt=prompt,
+                session_id=session_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                progress_callback=progress_callback,
+                model=model
+            )
+
+        # VPS 本地执行（原有逻辑）
         # 获取用户设置
         if not model:
             model = session_manager.get_user_model(user_id)
@@ -517,6 +535,9 @@ class ClaudeExecutor:
         elif event_type == "result":
             is_error = event.get("is_error", False)
             errors = event.get("errors", [])
+            subtype = event.get("subtype", "")
+
+            logger.debug(f"Result 事件: is_error={is_error}, subtype={subtype}, errors={errors[:100] if errors else []}")
 
             if is_error and errors:
                 error_str = str(errors)
@@ -546,6 +567,121 @@ class ClaudeExecutor:
             task.last_update_time = current_time
 
         return new_session_id
+
+    async def _execute_via_local_node(
+        self,
+        prompt: str,
+        session_id: Optional[str],
+        user_id: int,
+        chat_id: int,
+        message_id: int,
+        progress_callback: Callable[[str, Optional[str]], Awaitable[None]],
+        model: Optional[str] = None
+    ) -> Tuple[str, Optional[str]]:
+        """
+        通过本地节点代理执行 Claude Code
+
+        本地节点运行 Desktop API (FastAPI)，通过 Tailscale 内网访问
+
+        Returns:
+            (output, new_session_id)
+        """
+        import aiohttp
+
+        local_url = session_manager.get_local_node_url(user_id)
+        if not local_url:
+            return "❌ 未配置本地节点 URL\n\n使用 /target local <URL> 设置，例如:\n/target local http://100.x.x.x:2026", session_id
+
+        if not model:
+            model = session_manager.get_user_model(user_id)
+
+        # 获取 API Token (可选)
+        local_token = session_manager.get_local_node_token(user_id)
+
+        logger.info(f"代理到本地节点执行: {local_url}")
+        await progress_callback("", f"🔗 连接本地节点 {local_url}...")
+
+        accumulated_text = ""
+        new_session_id = session_id
+
+        # 构建请求头
+        headers = {"Content-Type": "application/json"}
+        if local_token:
+            headers["Authorization"] = f"Bearer {local_token}"
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=COMMAND_TIMEOUT)) as session:
+                # 调用本地节点的 /agent 端点 (SSE)
+                async with session.post(
+                    f"{local_url}/agent",
+                    json={
+                        "prompt": prompt,
+                        "model": model,
+                        "mode": "auto",
+                        "session_id": session_id
+                    },
+                    headers=headers
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        return f"❌ 本地节点错误 ({response.status}): {error_text[:200]}", session_id
+
+                    # 处理 SSE 流
+                    last_update = time.time()
+                    async for line in response.content:
+                        line_text = line.decode('utf-8', errors='replace').strip()
+                        if not line_text or not line_text.startswith('data:'):
+                            continue
+
+                        try:
+                            data = json.loads(line_text[5:].strip())
+                            event_type = data.get("type", "")
+
+                            if event_type == "session":
+                                new_session_id = data.get("sessionId", session_id)
+                                logger.info(f"本地节点 session: {new_session_id[:8] if new_session_id else 'None'}...")
+
+                            elif event_type == "text":
+                                content = data.get("content", "")
+                                if content:
+                                    accumulated_text += content
+                                    # 限制更新频率
+                                    if time.time() - last_update >= MESSAGE_UPDATE_INTERVAL:
+                                        await progress_callback(accumulated_text, "🖥️ 本地节点执行中...")
+                                        last_update = time.time()
+
+                            elif event_type == "tool_use":
+                                tool_name = data.get("name", "unknown")
+                                await progress_callback(accumulated_text, f"🔧 {tool_name} (本地)")
+
+                            elif event_type == "done":
+                                new_session_id = data.get("sessionId", new_session_id)
+                                break
+
+                            elif event_type == "error":
+                                error = data.get("content", "未知错误")
+                                accumulated_text += f"\n\n❌ 错误: {error}"
+                                break
+
+                        except json.JSONDecodeError:
+                            continue
+
+            return accumulated_text or "✅ 执行完成（无输出）", new_session_id
+
+        except aiohttp.ClientConnectorError as e:
+            return f"❌ 无法连接本地节点\n\n{local_url}\n\n错误: {str(e)}\n\n请检查:\n1. 本地 Desktop API 是否运行\n2. Tailscale 是否连接\n3. URL 是否正确", session_id
+        except aiohttp.ClientPayloadError as e:
+            # SSE 流传输中断（常见于 chunked encoding 提前结束）
+            # 如果已有累积内容则返回，否则报错
+            logger.warning(f"本地节点流中断: {e}, 已累积 {len(accumulated_text)} 字符")
+            if accumulated_text.strip():
+                return accumulated_text, new_session_id
+            return f"❌ 本地节点连接中断，请重试", session_id
+        except asyncio.TimeoutError:
+            return f"❌ 本地节点响应超时 ({COMMAND_TIMEOUT}秒)", session_id
+        except Exception as e:
+            logger.error(f"本地节点执行错误: {e}")
+            return f"❌ 本地节点执行错误: {str(e)}", session_id
 
     def execute_sync(
         self,

@@ -1,18 +1,21 @@
 """
 CloudWork Message Handlers
 
-处理用户直接发送的文本消息（非命令）
+处理用户直接发送的文本消息（非命令）和图片消息
 """
 
 import logging
+import os
 import shlex
+import uuid
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
-from telegram import Update
+from telegram import Update, PhotoSize
 from telegram.ext import ContextTypes, MessageHandler, filters
 
 from ...utils.auth import is_authorized
+from ...utils.config import settings
 from ...utils.formatters import (
     format_claude_output,
     format_progress_text,
@@ -30,17 +33,54 @@ logger = logging.getLogger(__name__)
 # 消息 ID 到会话 ID 的映射（用于回复消息时自动切换会话）
 message_session_map: dict = {}
 
+# 图片临时存储目录
+IMAGES_DIR = os.path.join(settings.data_dir, "images")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    处理用户直接发送的文本消息
 
-    支持:
-    - 在当前活跃会话中对话
-    - 回复历史消息自动切换到该会话
-    - 自动创建新会话（如果没有活跃会话）
+async def download_telegram_photo(
+    photo: PhotoSize,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int
+) -> Optional[str]:
     """
-    if not update.message or not update.message.text:
+    下载 Telegram 图片到本地
+
+    Args:
+        photo: Telegram PhotoSize 对象
+        context: Bot 上下文
+        user_id: 用户 ID
+
+    Returns:
+        本地文件路径，失败返回 None
+    """
+    try:
+        # 确保图片目录存在
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+
+        # 生成唯一文件名
+        file_ext = "jpg"  # Telegram 图片通常是 JPEG
+        filename = f"{user_id}_{uuid.uuid4().hex[:8]}.{file_ext}"
+        local_path = os.path.join(IMAGES_DIR, filename)
+
+        # 下载文件
+        file = await context.bot.get_file(photo.file_id)
+        await file.download_to_drive(local_path)
+
+        logger.info(f"图片已下载: {local_path} ({photo.width}x{photo.height})")
+        return local_path
+
+    except Exception as e:
+        logger.error(f"下载图片失败: {e}")
+        return None
+
+
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理用户发送的图片消息
+
+    下载图片到本地，然后让 Claude 通过 Read 工具读取图片
+    """
+    if not update.message or not update.message.photo:
         return
 
     user = update.effective_user
@@ -53,10 +93,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = user.id
+
+    # 获取最大尺寸的图片
+    photo = update.message.photo[-1]  # 最后一个是最大尺寸
+
+    # 获取图片说明文字（caption）
+    caption = update.message.caption or ""
+
+    logger.info(f"收到图片: user={user_id}, size={photo.width}x{photo.height}, caption={caption[:50] if caption else '无'}")
+
+    # 发送处理中消息
+    status_message = await update.message.reply_text("🖼️ 正在下载图片...")
+
+    # 下载图片
+    local_path = await download_telegram_photo(photo, context, user_id)
+    if not local_path:
+        await status_message.edit_text("❌ 图片下载失败，请重试")
+        return
+
+    # 构建 prompt
+    if caption:
+        prompt = f"请查看这张图片并回答用户的问题。\n\n图片路径: {local_path}\n\n用户说明: {caption}"
+    else:
+        prompt = f"请查看这张图片并描述其内容。\n\n图片路径: {local_path}"
+
+    # 将图片路径存入 context，以便清理
+    if 'temp_images' not in context.user_data:
+        context.user_data['temp_images'] = []
+    context.user_data['temp_images'].append(local_path)
+
+    # 使用 override_prompt 传递给 handle_message
+    context.user_data['override_prompt'] = prompt
+
+    # 删除状态消息，转交给 handle_message 处理
+    try:
+        await status_message.delete()
+    except Exception:
+        pass
+
+    # 调用文本消息处理器
+    await handle_message(update, context)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理用户直接发送的文本消息
+
+    支持:
+    - 在当前活跃会话中对话
+    - 回复历史消息自动切换到该会话
+    - 自动创建新会话（如果没有活跃会话）
+    - 通过 override_prompt 接收图片消息
+    """
+    # 检查是否有 override_prompt（从图片处理器或技能命令传入）
+    override_prompt = context.user_data.pop('override_prompt', None)
+
+    # 如果没有 override_prompt，需要有文本消息
+    if not override_prompt and (not update.message or not update.message.text):
+        return
+
+    user = update.effective_user
+    if not user:
+        return
+
+    # 权限检查（override_prompt 场景已在调用方检查过）
+    if not override_prompt and not is_authorized(user.id):
+        await update.message.reply_text("⛔ 您没有使用权限")
+        return
+
+    user_id = user.id
     chat_id = update.effective_chat.id
 
-    # 检查是否有 override_prompt（从技能命令传入）
-    override_prompt = context.user_data.pop('override_prompt', None)
+    # 确定 prompt
     prompt = override_prompt if override_prompt else update.message.text.strip()
 
     if not prompt:
@@ -368,8 +476,14 @@ async def _handle_ask_user_question(
 def get_message_handlers():
     """返回消息处理器列表"""
     return [
+        # 文本消息处理器
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_message
+        ),
+        # 图片消息处理器
+        MessageHandler(
+            filters.PHOTO,
+            handle_photo_message
         )
     ]

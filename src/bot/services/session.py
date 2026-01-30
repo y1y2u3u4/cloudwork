@@ -45,6 +45,12 @@ class UserData:
     execution_mode: str = "auto"
     project: str = "default"
     pending_name: Optional[str] = None  # 预设的会话名称
+    # 执行目标: "vps" (本机执行) 或 "local" (代理到本地节点)
+    execution_target: str = "vps"
+    # 本地节点配置 (Tailscale IP + 端口)
+    local_node_url: Optional[str] = None
+    # 本地节点 API Token (可选，用于远程认证)
+    local_node_token: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +59,9 @@ class UserData:
             "model": self.model,
             "execution_mode": self.execution_mode,
             "project": self.project,
+            "execution_target": self.execution_target,
+            "local_node_url": self.local_node_url,
+            "local_node_token": self.local_node_token,
         }
 
     @classmethod
@@ -63,6 +72,9 @@ class UserData:
             model=data.get("model", "sonnet"),
             execution_mode=data.get("execution_mode", "auto"),
             project=data.get("project", "default"),
+            execution_target=data.get("execution_target", "vps"),
+            local_node_url=data.get("local_node_url"),
+            local_node_token=data.get("local_node_token"),
         )
 
 
@@ -443,6 +455,48 @@ class SessionManager:
         """设置待创建会话的名称"""
         user_data = self.get_or_create_user_data(user_id)
         user_data.pending_name = name
+
+    # =====================================
+    # 执行目标管理 (VPS / Local)
+    # =====================================
+
+    def get_execution_target(self, user_id: int) -> str:
+        """获取用户执行目标 ('vps' 或 'local')"""
+        user_data = self.get_or_create_user_data(user_id)
+        return user_data.execution_target
+
+    def set_execution_target(self, user_id: int, target: str):
+        """设置用户执行目标"""
+        if target not in ("vps", "local"):
+            raise ValueError(f"无效的执行目标: {target}")
+        user_data = self.get_or_create_user_data(user_id)
+        user_data.execution_target = target
+        self.save_sessions()
+        logger.info(f"用户 {user_id} 切换执行目标: {target}")
+
+    def get_local_node_url(self, user_id: int) -> Optional[str]:
+        """获取用户的本地节点 URL"""
+        user_data = self.get_or_create_user_data(user_id)
+        return user_data.local_node_url
+
+    def set_local_node_url(self, user_id: int, url: Optional[str]):
+        """设置用户的本地节点 URL (例如 http://100.x.x.x:2026)"""
+        user_data = self.get_or_create_user_data(user_id)
+        user_data.local_node_url = url
+        self.save_sessions()
+        logger.info(f"用户 {user_id} 设置本地节点: {url}")
+
+    def get_local_node_token(self, user_id: int) -> Optional[str]:
+        """获取用户的本地节点 API Token"""
+        user_data = self.get_or_create_user_data(user_id)
+        return user_data.local_node_token
+
+    def set_local_node_token(self, user_id: int, token: Optional[str]):
+        """设置用户的本地节点 API Token"""
+        user_data = self.get_or_create_user_data(user_id)
+        user_data.local_node_token = token
+        self.save_sessions()
+        logger.info(f"用户 {user_id} 设置本地节点 Token: {'***' if token else 'None'}")
 
     # =====================================
     # 消息-会话映射

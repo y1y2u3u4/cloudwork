@@ -1,0 +1,12 @@
+{
+  "0": {
+    "active": null,
+    "sessions": {},
+    "model": "sonnet",
+    "execution_mode": "auto",
+    "project": "default",
+    "execution_target": "vps",
+    "local_node_url": null,
+    "local_node_token": null
+  }
+}
