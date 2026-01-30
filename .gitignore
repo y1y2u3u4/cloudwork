@@ -55,6 +55,13 @@ config/.env
 data/sessions.json
 data/*.json
 
+# Cron job outputs (large, generated data)
+data/cron_outputs/
+data/cron_processed/
+
+# User uploaded images
+data/images/
+
 # Claude CLI sessions (if mounted locally)
 .claude/
 

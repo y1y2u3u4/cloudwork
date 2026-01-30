@@ -378,123 +378,6 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def target_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    切换执行目标 (VPS 或本地节点)
-
-    用法:
-    - /target              查看当前目标
-    - /target vps          切换到 VPS 执行
-    - /target local <URL>  切换到本地节点，URL 为 Desktop API 地址
-    - /target local        切换到本地节点（使用已保存的 URL）
-    - /target token <TOKEN> 设置本地节点 API Token
-    - /target token        清除 Token
-    """
-    user = update.effective_user
-
-    if not is_authorized(user.id):
-        await update.message.reply_text("⛔ 未授权用户")
-        return
-
-    args = context.args
-    current_target = session_manager.get_execution_target(user.id)
-    current_url = session_manager.get_local_node_url(user.id)
-    current_token = session_manager.get_local_node_token(user.id)
-
-    if not args:
-        # 显示当前状态和切换按钮
-        status_emoji = "🖥️" if current_target == "vps" else "💻"
-        url_info = f"\n本地节点: `{current_url}`" if current_url else ""
-        token_info = "\nAPI Token: ✅ 已设置" if current_token else ""
-
-        # 构建按钮
-        buttons = []
-        if current_target == "vps":
-            # 当前是 VPS，显示切换到 Local 的按钮
-            if current_url:
-                buttons.append([InlineKeyboardButton("💻 切换到本地节点", callback_data="set_target:local")])
-            else:
-                buttons.append([InlineKeyboardButton("💻 设置本地节点", callback_data="set_target:local_setup")])
-        else:
-            # 当前是 Local，显示切换到 VPS 的按钮
-            buttons.append([InlineKeyboardButton("🖥️ 切换到 VPS", callback_data="set_target:vps")])
-
-        keyboard = InlineKeyboardMarkup(buttons)
-
-        await update.message.reply_text(
-            f"{status_emoji} *执行目标*\n\n"
-            f"当前: *{current_target.upper()}*{url_info}{token_info}\n\n"
-            f"_点击按钮切换，或使用命令:_\n"
-            f"`/target local <URL>` 设置本地节点\n"
-            f"`/target token <TOKEN>` 设置认证",
-            parse_mode='Markdown',
-            reply_markup=keyboard
-        )
-        return
-
-    new_target = args[0].lower()
-
-    if new_target == "vps":
-        session_manager.set_execution_target(user.id, "vps")
-        await update.message.reply_text(
-            "🖥️ 已切换到 *VPS 执行*\n\n任务将在 VPS 本地 Claude CLI 执行",
-            parse_mode='Markdown'
-        )
-
-    elif new_target == "local":
-        # 检查是否提供了 URL
-        if len(args) > 1:
-            new_url = args[1]
-            # 简单校验 URL 格式
-            if not new_url.startswith("http"):
-                new_url = f"http://{new_url}"
-            session_manager.set_local_node_url(user.id, new_url)
-            session_manager.set_execution_target(user.id, "local")
-            await update.message.reply_text(
-                f"💻 已切换到 *本地节点执行*\n\n"
-                f"节点地址: `{new_url}`\n\n"
-                f"请确保本地已运行 Desktop API 且 Tailscale 已连接",
-                parse_mode='Markdown'
-            )
-        elif current_url:
-            # 使用已保存的 URL
-            session_manager.set_execution_target(user.id, "local")
-            await update.message.reply_text(
-                f"💻 已切换到 *本地节点执行*\n\n"
-                f"节点地址: `{current_url}`",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                "❌ 请提供本地节点 URL\n\n"
-                "用法: `/target local http://100.x.x.x:2026`",
-                parse_mode='Markdown'
-            )
-
-    elif new_target == "token":
-        # 设置或清除 API Token
-        if len(args) > 1:
-            new_token = args[1]
-            session_manager.set_local_node_token(user.id, new_token)
-            await update.message.reply_text(
-                "🔑 *API Token 已设置*\n\n"
-                "本地节点请求将使用此 Token 进行认证",
-                parse_mode='Markdown'
-            )
-        else:
-            session_manager.set_local_node_token(user.id, None)
-            await update.message.reply_text(
-                "🔑 *API Token 已清除*",
-                parse_mode='Markdown'
-            )
-
-    else:
-        await update.message.reply_text(
-            f"❌ 无效目标: {new_target}\n\n可用: `vps`, `local`, `token`",
-            parse_mode='Markdown'
-        )
-
-
 async def project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """切换或查看当前项目（层级浏览）"""
     logger.info(f"收到 /project 命令: user={update.effective_user.id if update.effective_user else 'unknown'}")
@@ -781,34 +664,15 @@ async def ralph_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     completion_promise = "COMPLETE"
     prompt_parts = []
 
-    # 预处理第一步：拆分粘连的参数
-    # 例如: "2。-max" -> ["2。", "-max"]
-    # 例如: "文字-promise" -> ["文字", "-promise"]
-    import re
-    split_args = []
-    param_pattern = re.compile(r'(-{1,2}(?:max|promise|completion|max-iterations|completion-promise))\b', re.IGNORECASE)
-    for arg in args:
-        # 检查是否有粘连的参数标记
-        match = param_pattern.search(arg)
-        if match and match.start() > 0:
-            # 有粘连，拆分
-            prefix = arg[:match.start()]
-            suffix = arg[match.start():]
-            if prefix:
-                split_args.append(prefix)
-            split_args.append(suffix)
-        else:
-            split_args.append(arg)
-
-    # 预处理第二步：合并单独的 "-" 或 "--" 与后续 token
+    # 预处理：合并单独的 "-" 或 "--" 与后续 token
     # 例如: ["-", "max", "10"] -> ["-max", "10"]
     processed_args = []
     i = 0
-    while i < len(split_args):
-        arg = split_args[i]
-        if arg in ("-", "--") and i + 1 < len(split_args):
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-", "--") and i + 1 < len(args):
             # 合并 "-" 或 "--" 与下一个 token
-            next_arg = split_args[i + 1]
+            next_arg = args[i + 1]
             if not next_arg.startswith("-"):
                 processed_args.append(f"{arg}{next_arg}")
                 i += 2
@@ -1294,7 +1158,6 @@ def get_command_handlers():
         CommandHandler("delete", delete_session),
         CommandHandler("model", model_command),
         CommandHandler("mode", mode_command),
-        CommandHandler("target", target_command),  # 执行目标切换
         CommandHandler("project", project_command),
         CommandHandler("settings", settings_command),
         CommandHandler("cron", cron_command),

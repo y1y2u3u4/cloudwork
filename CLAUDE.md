@@ -15,7 +15,7 @@ cloudwork 是一个在 VPS 上运行 Claude Code 的远程自动化系统，通�
 │   cloudwork/    │ Thing │  tasks/cloudwork/ ← Bot运行目录  │
 └─────────────────┘       └─────────────────────────────────┘
                                         │
-                                        │ systemd (claude-bot.service)
+                                        │ systemd (cloudwork.service)
                                         ▼
                                 ┌─────────────────┐
                                 │  src/bot/main.py │
@@ -80,9 +80,9 @@ src/
 source config/.env && sshpass -p "$VPS_PASSWORD" ssh ${VPS_USER}@${VPS_HOST}
 
 # Bot 管理（在 VPS 上执行）
-systemctl restart claude-bot    # 重启 Bot（代码通过 Syncthing 自动同步，只需重启）
-systemctl status claude-bot     # 查看状态
-journalctl -u claude-bot -f     # 实时日志
+systemctl restart cloudwork    # 重启 Bot（代码通过 Syncthing 自动同步，只需重启）
+systemctl status cloudwork     # 查看状态
+journalctl -u cloudwork -f     # 实时日志
 
 # 手动同步代码（通常不需要，Syncthing 会自动同步）
 source config/.env && sshpass -p "$VPS_PASSWORD" scp -r src/* ${VPS_USER}@${VPS_HOST}:/home/claude/vps-cloud-runner/tasks/cloudwork/src/
@@ -90,7 +90,7 @@ source config/.env && sshpass -p "$VPS_PASSWORD" scp -r src/* ${VPS_USER}@${VPS_
 
 ### systemd 服务配置
 ```ini
-# /etc/systemd/system/claude-bot.service
+# /etc/systemd/system/cloudwork.service
 [Service]
 WorkingDirectory=/home/claude/vps-cloud-runner/tasks/cloudwork
 EnvironmentFile=/home/claude/vps-cloud-runner/tasks/cloudwork/config/.env
@@ -103,7 +103,7 @@ RestartSec=10
 
 **方法 1: 使用 sudo（需要 root 权限）**
 ```bash
-sudo systemctl restart claude-bot
+sudo systemctl restart cloudwork
 ```
 
 **方法 2: Kill 进程让 systemd 自动重启（无需 sudo）**
@@ -123,7 +123,7 @@ sleep 12 && ps aux | grep "src.bot.main" | grep -v grep
 ps aux | grep "src.bot.main" | grep -v grep
 
 # 检查服务状态
-systemctl status claude-bot
+systemctl status cloudwork
 ```
 
 ### Git Push（从 VPS 推送到 GitHub）
@@ -156,6 +156,11 @@ python -m src.bot.main
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
 | `TELEGRAM_ALLOWED_USERS` | 授权用户 ID（逗号分隔）|
 | `VPS_HOST` / `VPS_USER` / `VPS_PASSWORD` | VPS SSH 连接信息 |
+| `TAILSCALE_MAC_IP` | Mac Tailscale IP (100.90.229.128) |
+| `TAILSCALE_VPS_IP` | VPS Tailscale IP (100.96.65.52) |
+| `LOCAL_NODE_URL` | 本地节点 Desktop API 地址 |
+| `LOCAL_API_TOKEN` | Desktop API 认证 Token |
+| `LOCAL_API_PORT` | Desktop API 端口 (2026) |
 
 ## Telegram Bot Commands
 
@@ -167,8 +172,10 @@ python -m src.bot.main
 | `/new [名称]` | 创建新会话 |
 | `/archived` | 查看归档会话 |
 | `/delete <会话ID>` | 删除会话 |
+| `/target` | 切换执行目标 (VPS/本地节点) |
 | 直接发消息 | 在当前活跃会话中对话 |
 | 回复历史消息 | 自动切换到该消息的会话 |
+| 发送图片 | 图片会下载到 VPS 供 Claude 分析 |
 
 ## Session Management
 
@@ -185,6 +192,66 @@ VPS 运行 Python 3.9，类型注解需使用：
 from typing import Optional, Tuple
 def func(x: Optional[str]) -> Tuple[str, str]:  # 不要用 str | None 或 tuple[str, str]
 ```
+
+## 本地节点执行
+
+通过 Telegram Bot 远程控制本地 Mac 上的 Claude Code 执行，经 Tailscale 内网穿透。
+
+### 网络拓扑
+
+```
+手机 Telegram → VPS Bot (104.244.93.244) → Tailscale 内网 → Mac Desktop API
+                 Tailscale: 100.96.65.52                     Tailscale: 100.90.229.128
+```
+
+### Tailscale 配置（已完成）
+
+| 设备 | 公网 IP | Tailscale IP |
+|------|---------|-------------|
+| Mac (macbook-pro) | - | 100.90.229.128 |
+| VPS (secure-ducks-2) | 104.244.93.244 | 100.96.65.52 |
+
+账号: `zhanggongqing1314007@`，两端已登录同一 Tailscale 网络。
+
+### 启动 Desktop API
+
+```bash
+# 必须覆盖 .env 中的 VPS 路径为本地路径
+LOCAL_ROOT="/Users/zhanggongqing/project/孵化项目/cloudwork"
+cd "$LOCAL_ROOT" && \
+WORK_DIR="$LOCAL_ROOT" \
+DATA_DIR="$LOCAL_ROOT/data" \
+WORKSPACE_DIR="$LOCAL_ROOT/workspace" \
+LOG_FILE="$LOCAL_ROOT/logs/cloudwork.log" \
+CLOUDWORK_REQUIRE_AUTH=true \
+CLOUDWORK_API_TOKEN=$LOCAL_API_TOKEN \
+API_HOST=0.0.0.0 \
+python desktop/api/main.py
+```
+
+> **注意**: `.env` 中的 `WORK_DIR`/`DATA_DIR` 等路径是 VPS 的 `/home/claude/...`，
+> 本地启动 Desktop API 时必须覆盖为本地路径，否则会报 `OSError: Operation not supported`。
+
+### Telegram Bot 配置
+
+```
+/target local http://100.90.229.128:2026
+/target token 15f5781cbbb55fb8837137c448a86c49
+/target                                      # 查看状态
+/target vps                                  # 切回 VPS 执行
+```
+
+### 环境变量（config/.env）
+
+```
+TAILSCALE_MAC_IP=100.90.229.128
+TAILSCALE_VPS_IP=100.96.65.52
+LOCAL_NODE_URL=http://100.90.229.128:2026
+LOCAL_API_TOKEN=15f5781cbbb55fb8837137c448a86c49
+LOCAL_API_PORT=2026
+```
+
+→ 详细文档: `docs/local-node-execution.md`
 
 ## Memory System
 
@@ -225,6 +292,6 @@ def func(x: Optional[str]) -> Tuple[str, str]:  # 不要用 str | None 或 tuple
 
 ### Recent Activity
 - **01-25**: 实现三层记忆系统、修复 tool_display bug、简化为 CLAUDE.md 索引方式
-- **01-26**: 分析 Freqtrade 策略回测、对比 ClawdBot 记忆方案、实现持续学习和遗忘机制
+- **01-26**: 分析 Freqtrade 策略回测、实现持续学习和遗忘机制、添加图片支持、实现本地节点执行功能
 
 → 详情: `data/memory/daily/`
