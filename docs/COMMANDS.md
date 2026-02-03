@@ -18,6 +18,7 @@ CloudWork Telegram Bot 完整命令文档。
 | `/settings` | 打开设置菜单 | `/settings` |
 | `/status` | 查看运行状态 | `/status` |
 | `/cancel` | 取消当前任务 | `/cancel` |
+| `/target` | 切换执行目标 (VPS/本地) | `/target` |
 
 ---
 
@@ -242,6 +243,41 @@ Claude: 检测到多个文件，请选择要修改的文件：
 ```
 
 也可以直接发送 `取消` 文字。
+
+### `/target`
+
+切换执行目标（VPS 或本地节点）。
+
+```
+/target                              # 查看当前状态
+/target vps                          # 切回 VPS 执行
+/target local http://ip:port         # 切换到本地节点
+/target token your_api_token         # 设置本地节点 Token
+```
+
+**使用场景:**
+- 需要在本地 Mac 上执行任务（访问本地文件、MCP 服务等）
+- 通过 Tailscale 内网穿透连接
+
+📖 详细配置：[local-node-execution.md](local-node-execution.md)
+
+---
+
+## 🖼️ 图片分析
+
+直接发送图片给 Bot，Claude 会分析图片内容。
+
+**支持的场景:**
+- 截图分析代码错误
+- UI 设计稿分析
+- 图表数据解读
+- 任何需要视觉理解的任务
+
+```
+[发送图片]
+用户: 这个报错是什么意思？
+Claude: 根据截图，错误是...
+```
 
 ---
 
