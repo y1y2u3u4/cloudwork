@@ -78,6 +78,12 @@ class Settings(BaseSettings):
         """获取 Claude CLI 需要的环境变量"""
         env = os.environ.copy()
 
+        # 如果配置了 Auth Token，强制移除可能存在的 API Key
+        # 防止 Claude CLI 优先使用 API Key 导致认证模式错误
+        if self.anthropic_auth_token:
+            if "ANTHROPIC_API_KEY" in env:
+                del env["ANTHROPIC_API_KEY"]
+
         if self.anthropic_api_key:
             env["ANTHROPIC_API_KEY"] = self.anthropic_api_key
 

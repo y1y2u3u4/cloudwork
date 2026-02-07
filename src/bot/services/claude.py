@@ -28,7 +28,7 @@ USER_INPUT_TIMEOUT = 120  # 用户输入超时时间（秒）
 # 可用模型
 AVAILABLE_MODELS = {
     "sonnet": "Claude Sonnet - 平衡",
-    "opus": "Claude Opus - 最强",
+    "claude-opus-4-6": "Claude Opus 4.6 - 最强",
     "haiku": "Claude Haiku - 最快"
 }
 
