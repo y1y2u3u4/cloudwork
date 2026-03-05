@@ -160,6 +160,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data.startswith("set_target:"):
             await _handle_set_target(query, user_id, data)
 
+        # 转录模版选择
+        elif data.startswith("transcribe_tpl:"):
+            await _handle_transcribe_template(update, query, context, user_id, data)
+
+        # 转录自定义提示
+        elif data.startswith("transcribe_custom:"):
+            await _handle_transcribe_custom(query, context, user_id, data)
+
         # SEO 关键词挖掘
         elif data.startswith("seo:"):
             await _handle_seo_callback(query, context, user_id, data)
@@ -758,6 +766,27 @@ async def _handle_skill_callback(query, context: ContextTypes.DEFAULT_TYPE, user
                 InlineKeyboardButton("◀️ 返回", callback_data="skill:back:menu")
             ]]
 
+    elif skill_name == "transcribe":
+        # Transcribe 只有 info，因为触发靠发送音频
+        text = (
+            "🎤 *Transcribe*\n\n"
+            "*功能:*\n"
+            "• 语音/音频文件转录为文字\n"
+            "• 支持多种加工模版整理\n"
+            "• 支持自定义提示词加工\n\n"
+            "*使用方式:*\n"
+            "• 直接发送语音消息\n"
+            "• 发送音频文件 \\(mp3/m4a/wav等\\)\n"
+            "• 转录后选择加工模版\n\n"
+            "*可用模版:*\n"
+            "📋 会议纪要 \\| 📝 内容摘要\n"
+            "✅ 待办提取 \\| 📰 文章整理\n"
+            "📄 仅转录 \\| ✏️ 自定义提示"
+        )
+        keyboard = [[
+            InlineKeyboardButton("◀️ 返回", callback_data="skill:back:menu")
+        ]]
+
     elif skill_name == "back":
         # 返回技能列表
         keyboard = [
@@ -768,6 +797,10 @@ async def _handle_skill_callback(query, context: ContextTypes.DEFAULT_TYPE, user
             [
                 InlineKeyboardButton("🔄 Ralph", callback_data="skill:ralph:use"),
                 InlineKeyboardButton("ℹ️", callback_data="skill:ralph:info"),
+            ],
+            [
+                InlineKeyboardButton("🎤 Transcribe", callback_data="skill:transcribe:info"),
+                InlineKeyboardButton("ℹ️", callback_data="skill:transcribe:info"),
             ],
         ]
         text = "🛠️ *可用技能*\n\n点击技能名称直接使用，点击 ℹ️ 查看详情"
@@ -1181,6 +1214,107 @@ async def _handle_set_target(query, user_id: int, data: str):
 
     else:
         await query.edit_message_text(f"❌ 无效目标: {target}")
+
+
+# =====================================
+# 转录模版回调处理
+# =====================================
+
+async def _handle_transcribe_template(update: Update, query, context: ContextTypes.DEFAULT_TYPE, user_id: int, data: str):
+    """
+    处理转录模版选择回调
+
+    回调数据格式: transcribe_tpl:{template_key}:{user_id}
+    """
+    from ..services.skills import transcribe_manager, TRANSCRIBE_TEMPLATES
+    from .messages import handle_message
+
+    parts = data.split(":")
+    if len(parts) < 3:
+        await query.edit_message_text("⚠️ 无效的模版数据")
+        return
+
+    template_key = parts[1]
+
+    # 获取暂存的转录文本
+    transcribed_text = context.user_data.get('pending_transcription')
+    if not transcribed_text:
+        await query.edit_message_text("❌ 转录文本已过期，请重新发送音频")
+        return
+
+    template = TRANSCRIBE_TEMPLATES.get(template_key)
+    if not template:
+        await query.edit_message_text("⚠️ 未知的模版类型")
+        return
+
+    template_name = template["name"]
+
+    # 仅转录模式：直接返回转录文本
+    if template_key == "raw":
+        # 清除暂存
+        context.user_data.pop('pending_transcription', None)
+        await query.edit_message_text(
+            f"📄 转录文本：\n\n{transcribed_text}"
+        )
+        return
+
+    # 构建加工 prompt
+    process_prompt = transcribe_manager.build_process_prompt(template_key, transcribed_text)
+    if not process_prompt:
+        await query.edit_message_text("❌ 模版构建失败")
+        return
+
+    # 记录模版信息，用于加工完成后保存结果
+    transcription_path = context.user_data.get('transcription_path', '')
+    source_filename = "audio"
+    if transcription_path:
+        import os
+        source_filename = os.path.basename(transcription_path)
+    context.user_data['pending_save_template'] = {
+        'template_name': template_name,
+        'source_filename': source_filename,
+    }
+
+    # 清除暂存
+    context.user_data.pop('pending_transcription', None)
+    context.user_data.pop('transcription_path', None)
+
+    # 更新消息显示正在加工
+    await query.edit_message_text(
+        f"{template['emoji']} 正在用「{template_name}」模版整理..."
+    )
+
+    # 通过 override_prompt 传入 handle_message 执行 Claude 加工
+    # 注意: 此处 update 来自 callback query，update.message 为 None
+    # handle_message 通过 update.callback_query.message 获取消息对象
+    context.user_data['override_prompt'] = process_prompt
+    await handle_message(update, context)
+
+
+async def _handle_transcribe_custom(query, context: ContextTypes.DEFAULT_TYPE, user_id: int, data: str):
+    """
+    处理转录自定义提示回调
+
+    设置 pending_skill，等待用户输入自定义 prompt
+    """
+    # 检查是否有暂存的转录文本
+    transcribed_text = context.user_data.get('pending_transcription')
+    if not transcribed_text:
+        await query.edit_message_text("❌ 转录文本已过期，请重新发送音频")
+        return
+
+    # 设置待处理状态
+    context.user_data['pending_skill'] = 'transcribe_custom'
+
+    await query.edit_message_text(
+        "✏️ *自定义加工*\n\n"
+        "请直接发送您的提示词，例如：\n"
+        "• 翻译成英文\n"
+        "• 提取关键数据\n"
+        "• 改写为正式商务风格\n\n"
+        f"_转录文本 ({len(transcribed_text)} 字) 已暂存_",
+        parse_mode='Markdown'
+    )
 
 
 # =====================================

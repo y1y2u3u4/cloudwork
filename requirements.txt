@@ -12,5 +12,8 @@ pydantic-settings>=2.1.0
 # Async support
 aiofiles>=23.2.1
 
+# OpenAI SDK (Whisper 语音转文字)
+openai>=1.0.0
+
 # Utilities
 pyyaml>=6.0

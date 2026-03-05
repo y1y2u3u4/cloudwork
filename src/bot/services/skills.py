@@ -614,6 +614,253 @@ class KeywordMiningManager:
         return status
 
 
+# ============ Transcribe Skill ============
+
+# ============ 音频来源解析器 ============
+
+# 已知的音频分享平台 URL 模式 → 解析方法
+# Plaud: https://web.plaud.cn/share/{share_id}
+PLAUD_SHARE_PATTERN = r'https?://web\.plaud\.cn/share/([a-zA-Z0-9]+)'
+
+
+async def resolve_audio_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    解析音频 URL，支持直接音频链接和平台分享链接
+
+    支持的来源：
+    - 直接音频 URL（.mp3/.m4a/.wav/.ogg 等）→ 原样返回
+    - Plaud 分享链接 → 调用 API 获取临时下载 URL
+
+    Args:
+        url: 用户提供的 URL
+
+    Returns:
+        (audio_url, filename) — 音频下载地址和文件名，失败返回 (None, None)
+    """
+    import re
+    import httpx
+
+    url = url.strip()
+
+    # 1. Plaud 分享链接
+    plaud_match = re.match(PLAUD_SHARE_PATTERN, url)
+    if plaud_match:
+        share_id = plaud_match.group(1)
+        return await _resolve_plaud_url(share_id)
+
+    # 2. 直接音频 URL（以音频扩展名结尾，忽略 query string）
+    audio_ext_pattern = re.compile(
+        r'https?://\S+\.(?:mp3|m4a|wav|ogg|flac|aac|wma|opus|webm)(?:\?\S*)?$',
+        re.IGNORECASE
+    )
+    if audio_ext_pattern.match(url):
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        filename = os.path.basename(unquote(parsed.path)) or "audio.mp3"
+        return url, filename
+
+    return None, None
+
+
+async def _resolve_plaud_url(share_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    从 Plaud 分享 ID 获取音频下载 URL
+
+    Plaud API 流程：
+    1. GET /file/share-content/{share_id} → 获取文件信息（文件名、时长等）
+    2. GET /file/share-file-temp/{share_id} → 获取 S3 临时下载 URL（1小时有效）
+    """
+    import httpx
+
+    api_base = "https://api.plaud.cn"
+    headers = {
+        "Content-Type": "application/json",
+        "app-platform": "web",
+        "edit-from": "web",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # 获取文件信息
+            info_resp = await client.get(
+                f"{api_base}/file/share-content/{share_id}",
+                headers=headers
+            )
+            info_data = info_resp.json()
+
+            filename = "plaud_recording.mp3"
+            if info_data.get("status") == 0:
+                data_file = info_data.get("data_file", {})
+                ori_fullname = data_file.get("ori_fullname", "")
+                if ori_fullname:
+                    filename = ori_fullname
+                duration_ms = data_file.get("duration", 0)
+                logger.info(
+                    f"Plaud 文件: {filename}, "
+                    f"时长: {duration_ms // 1000}s, "
+                    f"大小: {data_file.get('filesize', 0)} bytes"
+                )
+
+            # 获取临时下载 URL
+            temp_resp = await client.get(
+                f"{api_base}/file/share-file-temp/{share_id}",
+                headers=headers
+            )
+            temp_data = temp_resp.json()
+
+            if temp_data.get("status") == 0 and temp_data.get("temp_url"):
+                return temp_data["temp_url"], filename
+
+            logger.error(f"Plaud 获取下载 URL 失败: {temp_data}")
+            return None, None
+
+    except Exception as e:
+        logger.error(f"Plaud URL 解析失败: {e}")
+        return None, None
+
+
+# ============ Transcribe Skill ============
+
+TRANSCRIBE_TEMPLATES = {
+    "meeting": {
+        "name": "会议纪要",
+        "emoji": "📋",
+        "prompt": (
+            "请将以下语音转录文本整理为结构化的会议纪要。\n\n"
+            "要求：\n"
+            "1. 按讨论主题分节，每节包含讨论要点和关键数据\n"
+            "2. 用表格列出关键决议（决议 | 详情）\n"
+            "3. 提取所有 Action Items，用 checklist 格式，标注责任人和时间\n"
+            "4. 口语化内容（对对对、嗯嗯）需过滤，保留实质信息\n"
+            "5. 使用清晰的 Markdown 格式，包含二级和三级标题\n\n"
+            "转录文本：\n{text}"
+        ),
+    },
+    "summary": {
+        "name": "内容摘要",
+        "emoji": "📝",
+        "prompt": (
+            "请将以下语音转录文本提炼为简洁的内容摘要。\n\n"
+            "要求：\n"
+            "1. 提取核心观点和关键信息\n"
+            "2. 按逻辑分层归纳，使用二级标题分节\n"
+            "3. 保留重要的数据、名称和结论\n"
+            "4. 过滤口语化表达和重复内容\n"
+            "5. 摘要长度控制在原文的 20%-30%\n\n"
+            "转录文本：\n{text}"
+        ),
+    },
+    "todo": {
+        "name": "待办提取",
+        "emoji": "✅",
+        "prompt": (
+            "请从以下语音转录文本中提取所有行动项和待办事项。\n\n"
+            "要求：\n"
+            "1. 提取所有明确或隐含的任务和行动项\n"
+            "2. 标注优先级（高/中/低）\n"
+            "3. 标注责任人和截止时间（如有提及）\n"
+            "4. 使用 checklist 格式输出：- [ ] **[优先级]** 任务描述 @责任人 截止时间\n\n"
+            "转录文本：\n{text}"
+        ),
+    },
+    "article": {
+        "name": "文章整理",
+        "emoji": "📰",
+        "prompt": (
+            "请将以下口述内容整理为一篇通顺、有条理的文章。\n\n"
+            "要求：\n"
+            "1. 去除口语化表达、重复和语气词（嗯、对对对、然后等）\n"
+            "2. 理顺逻辑结构，添加合适的段落划分和小标题\n"
+            "3. 保留原意，不添加未提及的内容\n"
+            "4. 使用清晰的 Markdown 格式输出\n\n"
+            "口述内容：\n{text}"
+        ),
+    },
+    "raw": {
+        "name": "仅转录",
+        "emoji": "📄",
+        "prompt": None,  # 不加工，直接返回转录文本
+    },
+}
+
+
+class TranscribeManager:
+    """音频转录 + 文字加工技能管理器"""
+
+    @staticmethod
+    def build_process_prompt(template_key: str, transcribed_text: str) -> Optional[str]:
+        """
+        根据模版构建加工 prompt
+
+        Args:
+            template_key: 模版 key (meeting/summary/todo/article/raw)
+            transcribed_text: 转录文本
+
+        Returns:
+            加工 prompt，raw 模版返回 None
+        """
+        template = TRANSCRIBE_TEMPLATES.get(template_key)
+        if not template:
+            return None
+
+        prompt_tpl = template.get("prompt")
+        if prompt_tpl is None:
+            return None
+
+        return prompt_tpl.format(text=transcribed_text)
+
+    @staticmethod
+    def get_template_keyboard(user_id: int):
+        """
+        构建模版选择的 InlineKeyboard
+
+        Args:
+            user_id: 用户 ID（用于回调数据）
+
+        Returns:
+            InlineKeyboardMarkup
+        """
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📋 会议纪要",
+                    callback_data=f"transcribe_tpl:meeting:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    "📝 内容摘要",
+                    callback_data=f"transcribe_tpl:summary:{user_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "✅ 待办提取",
+                    callback_data=f"transcribe_tpl:todo:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    "📰 文章整理",
+                    callback_data=f"transcribe_tpl:article:{user_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📄 仅转录",
+                    callback_data=f"transcribe_tpl:raw:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    "✏️ 自定义提示",
+                    callback_data=f"transcribe_custom:{user_id}"
+                ),
+            ],
+        ]
+
+        return InlineKeyboardMarkup(keyboard)
+
+
+transcribe_manager = TranscribeManager()
+
+
 # 全局管理器实例
 planning_manager: Optional[PlanningManager] = None
 ralph_loop_manager = RalphLoopManager()
@@ -625,4 +872,4 @@ def init_skills(workspace_dir: str):
     global planning_manager, keyword_mining_manager
     planning_manager = PlanningManager(workspace_dir)
     keyword_mining_manager = KeywordMiningManager(workspace_dir)
-    logger.info("Skills managers initialized (planning, ralph-loop, keyword-mining)")
+    logger.info("Skills managers initialized (planning, ralph-loop, keyword-mining, transcribe)")

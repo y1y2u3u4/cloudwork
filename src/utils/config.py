@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     workspace_dir: str = "./workspace"
 
     # =====================================
+    # Whisper (语音转文字)
+    # =====================================
+    whisper_api_key: str = ""
+    whisper_base_url: str = "https://api.groq.com/openai/v1"
+    whisper_model: str = "whisper-large-v3"
+
+    # =====================================
     # Session Settings
     # =====================================
     auto_archive_minutes: int = 30

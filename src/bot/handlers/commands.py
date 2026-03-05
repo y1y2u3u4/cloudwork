@@ -888,6 +888,10 @@ async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔄 Ralph", callback_data="skill:ralph:use"),
             InlineKeyboardButton("ℹ️", callback_data="skill:ralph:info"),
         ],
+        [
+            InlineKeyboardButton("🎤 Transcribe", callback_data="skill:transcribe:info"),
+            InlineKeyboardButton("ℹ️", callback_data="skill:transcribe:info"),
+        ],
     ]
 
     await update.message.reply_text(
