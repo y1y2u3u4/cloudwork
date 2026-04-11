@@ -4,6 +4,7 @@ Usage:
     python main.py scan               # Scan and display candidate markets (no API key needed)
     python main.py predict            # Full pipeline: scan → predict → detect edges → log to DB
     python main.py predict-one <id>   # Predict a single market by its Polymarket market ID
+    python main.py deep-analyze <id>  # Map-Reduce deep analysis on a single market
     python main.py stats              # Show prediction statistics from the local DB
     python main.py resolve            # Check unresolved predictions against settled markets
 """
@@ -18,6 +19,7 @@ from config import DB_PATH, GAMMA_API_URL
 from models import Database
 from scanner import fetch_active_markets, parse_market
 from predictor import predict_market
+from map_reduce_predictor import predict_market_deep
 from edge import generate_signal
 from monitor import format_signal_report, format_stats_report
 
@@ -228,6 +230,88 @@ def cmd_predict_one(market_id: str) -> None:
     db.close()
 
 
+def cmd_deep_analyze(market_id: str) -> None:
+    """Fetch a single market by ID and run Map-Reduce deep analysis."""
+    db = ensure_db()
+
+    print(f"Fetching market {market_id}…")
+    url = f"{GAMMA_API_URL}/markets/{market_id}"
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        raw = response.json()
+    except requests.RequestException as exc:
+        print(f"Error fetching market: {exc}")
+        db.close()
+        return
+
+    try:
+        market = parse_market(raw)
+    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Error parsing market data: {exc}")
+        db.close()
+        return
+
+    print(f"Question : {market['question']}")
+    print(f"Category : {market.get('category', 'N/A')}")
+    print(f"Price    : {market['yes_price']:.1%}")
+    print(f"Liquidity: {market.get('liquidity', 0):,.0f} USDC")
+    print(f"End Date : {market.get('end_date', 'N/A')}")
+    print("\nRunning Map-Reduce deep analysis (4 parallel sub-analyses)…\n")
+
+    _save_market_from_dict(db, market)
+    result = predict_market_deep(market)
+
+    # Print each sub-analysis
+    dimensions = result.get("dimensions", {})
+    sub_analysis_labels = {
+        "resolution_rules": "=== Analysis 1: Resolution Rules ===",
+        "evidence": "=== Analysis 2: Evidence Gathering ===",
+        "counter_arguments": "=== Analysis 3: Counter-Arguments (Devil's Advocate) ===",
+        "catalysts": "=== Analysis 4: Domain Catalysts ===",
+    }
+    for key, label in sub_analysis_labels.items():
+        if key in dimensions:
+            print(label)
+            value = dimensions[key]
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    print(f"  {k}: {v}")
+            else:
+                print(f"  {value}")
+            print()
+
+    ai_prob = result["probability"]
+    confidence = result["confidence"]
+    market_price = market["yes_price"]
+    edge = ai_prob - market_price
+
+    print("=== Final Synthesis ===")
+    print(f"  AI Probability : {ai_prob:.1%}")
+    print(f"  AI Confidence  : {confidence:.1%}")
+    print(f"  Market Price   : {market_price:.1%}")
+    print(f"  Edge           : {edge:+.1%}")
+    print(f"\nReasoning:\n{result.get('reasoning', 'N/A')}")
+
+    pred_id = _save_prediction_from_result(db, market, result)
+    print(f"\nSaved prediction (id={pred_id}) to DB.")
+
+    signal = generate_signal(
+        market_id=market["market_id"],
+        question=market["question"],
+        ai_prob=ai_prob,
+        ai_confidence=confidence,
+        market_price=market_price,
+    )
+    if signal:
+        print("\n>>> SIGNAL DETECTED")
+        print(format_signal_report(signal, reasoning=result.get("reasoning", "")))
+    else:
+        print("\nNo signal generated (edge or confidence below threshold).")
+
+    db.close()
+
+
 def cmd_stats() -> None:
     """Display prediction statistics from the local database."""
     db = ensure_db()
@@ -328,6 +412,11 @@ def main() -> None:
             print("Usage: python main.py predict-one <market_id>")
             sys.exit(1)
         cmd_predict_one(args[1])
+    elif cmd == "deep-analyze":
+        if len(args) < 2:
+            print("Usage: python main.py deep-analyze <market_id>")
+            sys.exit(1)
+        cmd_deep_analyze(args[1])
     elif cmd == "stats":
         cmd_stats()
     elif cmd == "resolve":

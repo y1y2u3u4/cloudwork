@@ -72,6 +72,7 @@ logs/
 # Workspace (user projects)
 workspace/*
 !workspace/.gitkeep
+!workspace/workany-web/
 
 # =====================================
 # Docker
@@ -103,3 +104,4 @@ desktop/dist/
 desktop/src-tauri/target/
 desktop/.vite/
 desktop/pnpm-lock.yaml
+.gstack/
