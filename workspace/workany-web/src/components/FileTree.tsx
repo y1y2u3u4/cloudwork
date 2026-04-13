@@ -36,7 +36,7 @@ function TreeNode({
   selectedPath: string;
   onSelect: (path: string, isDir: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(depth === 0);
+  const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[] | null>(
     entry.children || null
   );
@@ -71,13 +71,30 @@ function TreeNode({
       : Folder
     : getFileIcon(entry.extension);
 
+  const handleDragStart = (e: React.DragEvent) => {
+    if (entry.isDirectory) return;
+    e.dataTransfer.setData(
+      "application/workspace-file",
+      JSON.stringify({ path: entry.path, name: entry.name })
+    );
+    e.dataTransfer.effectAllowed = "copy";
+    (e.target as HTMLElement).style.opacity = "0.5";
+  };
+
+  const handleDragEnd = (e: React.DragEvent) => {
+    (e.target as HTMLElement).style.opacity = "1";
+  };
+
   return (
     <div>
       <button
         onClick={handleClick}
+        draggable={!entry.isDirectory}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
         className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-sidebar-hover ${
           isSelected ? "bg-accent-light text-accent font-medium" : "text-foreground/80"
-        }`}
+        } ${!entry.isDirectory ? "cursor-grab active:cursor-grabbing" : ""}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
       >
         {entry.isDirectory ? (

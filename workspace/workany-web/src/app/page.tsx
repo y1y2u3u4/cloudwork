@@ -1,18 +1,26 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   PanelLeft,
   Search,
   MessageSquare,
   FolderTree,
   X,
+  ListTodo,
 } from "lucide-react";
 import { FileTree } from "@/components/FileTree";
 import { MarkdownViewer } from "@/components/MarkdownViewer";
 import { AgentPanel } from "@/components/AgentPanel";
-import { ChatPanel } from "@/components/ChatPanel";
+import { ChatPanel, ContextQuote } from "@/components/ChatPanel";
+import { SelectionActionBar } from "@/components/SelectionActionBar";
+import { CommentSidebar, CommentThread } from "@/components/CommentSidebar";
+import { TaskRunner } from "@/components/TaskRunner";
+import { TaskToast } from "@/components/TaskToast";
+import { TasksPanel } from "@/components/TasksPanel";
+import { useTaskStore } from "@/lib/useTaskStore";
 import type { Agent } from "@/lib/agents";
+import type { Task } from "@/lib/taskTypes";
 
 interface FileEntry {
   name: string;
@@ -22,7 +30,7 @@ interface FileEntry {
   children?: FileEntry[];
 }
 
-type ViewMode = "file" | "chat";
+type ViewMode = "file" | "chat" | "tasks";
 
 export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -37,6 +45,13 @@ export default function Home() {
   >([]);
   const [searching, setSearching] = useState(false);
   const [workspaceDirs, setWorkspaceDirs] = useState<string[]>([]);
+  const [contextQuote, setContextQuote] = useState<ContextQuote | null>(null);
+  const [comments, setComments] = useState<CommentThread[]>([]);
+  const [navigateConvoId, setNavigateConvoId] = useState<string | null>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
+
+  // Task store
+  const taskStore = useTaskStore();
 
   // Load file tree
   const loadTree = useCallback(async () => {
@@ -44,7 +59,6 @@ export default function Home() {
       const res = await fetch("/api/workspace?action=tree&depth=1");
       const data = await res.json();
       setEntries(data.entries || []);
-      // Extract top-level directories for agent project picker
       const dirs = (data.entries || [])
         .filter((e: FileEntry) => e.isDirectory)
         .map((e: FileEntry) => e.path);
@@ -80,16 +94,86 @@ export default function Home() {
           `/api/workspace?action=read&path=${encodeURIComponent(path)}`
         );
         const data = await res.json();
-        if (data.error) {
-          setFileContent(`Error: ${data.error}`);
-        } else {
-          setFileContent(data.content || "");
-        }
+        setFileContent(data.error ? `Error: ${data.error}` : data.content || "");
       } catch {
         setFileContent("Failed to load file");
       }
     }
   };
+
+  // Open file from chat (FileRefCard click)
+  const handleOpenFile = (path: string) => {
+    handleSelect(path, false);
+  };
+
+  // Selection action from file preview → add new comment thread
+  const handleSelectionAction = (context: {
+    selectedText: string;
+    filePath: string;
+    position: { top: number; left: number };
+  }) => {
+    const newThread: CommentThread = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      selectedText: context.selectedText,
+      filePath: context.filePath,
+      messages: [],
+      sessionId: "",
+      status: "draft",
+      createdAt: Date.now(),
+    };
+    setComments(prev => [newThread, ...prev]);
+  };
+
+  const handleUpdateThread = useCallback((id: string, patch: Partial<CommentThread>) => {
+    setComments(prev => prev.map(t => t.id === id ? { ...t, ...patch } : t));
+  }, []);
+
+  const handleRemoveThread = useCallback((id: string) => {
+    setComments(prev => prev.filter(t => t.id !== id));
+    // Remove associated highlight
+    document.querySelectorAll("mark.workany-highlight").forEach(el => {
+      const parent = el.parentNode;
+      if (parent) { parent.replaceChild(document.createTextNode(el.textContent || ""), el); parent.normalize(); }
+    });
+  }, []);
+
+  const handleClearQuote = () => setContextQuote(null);
+
+  // Navigate to a task's source
+  const handleNavigateToTask = useCallback((task: Task) => {
+    if (task.source.kind === "chat") {
+      setNavigateConvoId(task.source.conversationId);
+      setViewMode("chat");
+      // Clear after navigation
+      setTimeout(() => setNavigateConvoId(null), 500);
+    } else if (task.source.kind === "inline") {
+      handleSelect(task.source.filePath, false);
+      // Add the task result as a comment thread if not already there
+      setComments(prev => {
+        if (prev.some(t => t.taskId === task.id)) return prev;
+        return [{
+          id: task.id,
+          selectedText: task.source.selectedText,
+          filePath: task.source.filePath,
+          messages: [
+            { role: "user" as const, content: task.title },
+            { role: "assistant" as const, content: task.result },
+          ],
+          sessionId: task.sessionId,
+          taskId: task.id,
+          agentId: task.agentId,
+          agentName: task.agentName,
+          status: "done" as const,
+          createdAt: task.createdAt,
+        }, ...prev];
+      });
+    }
+  }, []);
+
+  // Task complete notification → navigate
+  const handleTaskComplete = useCallback((task: Task) => {
+    // Toast will handle notification via recentlyCompleted
+  }, []);
 
   // Search
   const handleSearch = async (query: string) => {
@@ -116,6 +200,23 @@ export default function Home() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
+      {/* TaskRunner (headless) */}
+      <TaskRunner
+        tasks={taskStore.tasks}
+        updateTask={taskStore.updateTask}
+        onTaskComplete={handleTaskComplete}
+      />
+
+      {/* Toast notifications */}
+      <TaskToast
+        tasks={taskStore.recentlyCompleted}
+        onView={(task) => {
+          taskStore.markTaskSeen(task.id);
+          handleNavigateToTask(task);
+        }}
+        onDismiss={(id) => taskStore.markTaskSeen(id)}
+      />
+
       {/* Sidebar */}
       {sidebarOpen && (
         <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-sidebar">
@@ -132,7 +233,7 @@ export default function Home() {
             </button>
           </div>
 
-          {/* View mode toggle */}
+          {/* View mode toggle — 3 tabs */}
           <div className="flex gap-1 px-2 pb-2">
             <button
               onClick={() => setViewMode("file")}
@@ -155,6 +256,22 @@ export default function Home() {
             >
               <MessageSquare className="size-3.5" />
               Chat
+            </button>
+            <button
+              onClick={() => setViewMode("tasks")}
+              className={`relative flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-medium transition-colors ${
+                viewMode === "tasks"
+                  ? "bg-accent-light text-accent"
+                  : "text-muted hover:bg-sidebar-hover"
+              }`}
+            >
+              <ListTodo className="size-3.5" />
+              Tasks
+              {taskStore.runningCount > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 flex size-4 items-center justify-center rounded-full bg-accent text-[10px] text-white">
+                  {taskStore.runningCount}
+                </span>
+              )}
             </button>
           </div>
 
@@ -252,23 +369,52 @@ export default function Home() {
 
         {viewMode === "file" ? (
           selectedPath && !entries.find((e) => e.path === selectedPath)?.isDirectory ? (
-            isMarkdown ? (
-              <MarkdownViewer content={fileContent} filePath={selectedPath} onSave={(newContent) => setFileContent(newContent)} />
-            ) : (
-              <div className="flex h-full flex-col">
-                <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2.5">
-                  <span className="text-sm font-medium">
-                    {selectedPath.split("/").pop()}
-                  </span>
-                  <span className="text-xs text-muted">{selectedPath}</span>
-                </div>
-                <div className="flex-1 overflow-auto px-6 py-4">
-                  <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed">
-                    {fileContent}
-                  </pre>
-                </div>
+            <div className="flex h-full">
+              {/* File preview — left side */}
+              <div className="relative flex min-w-0 flex-1 flex-col" ref={previewRef}>
+                <SelectionActionBar
+                  containerRef={previewRef}
+                  filePath={selectedPath}
+                  onAction={handleSelectionAction}
+                />
+                {isMarkdown ? (
+                  <MarkdownViewer content={fileContent} filePath={selectedPath} onSave={(newContent) => setFileContent(newContent)} />
+                ) : (
+                  <>
+                    <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2.5">
+                      <span className="text-sm font-medium">
+                        {selectedPath.split("/").pop()}
+                      </span>
+                      <span className="text-xs text-muted">{selectedPath}</span>
+                    </div>
+                    <div className="flex-1 overflow-auto px-6 py-4">
+                      <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed select-text">
+                        {fileContent}
+                      </pre>
+                    </div>
+                  </>
+                )}
               </div>
-            )
+              {/* Comment sidebar — right side, Feishu-style multi-thread */}
+              {comments.length > 0 && (
+                <CommentSidebar
+                  threads={comments}
+                  fileContent={fileContent}
+                  agents={agents}
+                  onUpdateThread={handleUpdateThread}
+                  onRemoveThread={handleRemoveThread}
+                  createTask={taskStore.createTask}
+                  updateTask={taskStore.updateTask}
+                  onFileChanged={(path) => {
+                    if (path === selectedPath) {
+                      fetch(`/api/workspace?action=read&path=${encodeURIComponent(path)}`)
+                        .then(r => r.json())
+                        .then(data => { if (!data.error) setFileContent(data.content || ""); });
+                    }
+                  }}
+                />
+              )}
+            </div>
           ) : (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
@@ -279,18 +425,30 @@ export default function Home() {
               </div>
             </div>
           )
-        ) : (
+        ) : viewMode === "chat" ? (
           <ChatPanel
             agents={agents}
             activeFile={selectedPath && !entries.find((e) => e.path === selectedPath)?.isDirectory ? { path: selectedPath, content: fileContent } : undefined}
+            contextQuote={contextQuote}
+            onClearQuote={handleClearQuote}
+            onOpenFile={handleOpenFile}
+            createTask={taskStore.createTask}
+            updateTask={taskStore.updateTask}
+            navigateToConversationId={navigateConvoId}
             onFileChanged={(path) => {
-              // Reload file content if the changed file is the one we're viewing
               if (path === selectedPath) {
                 fetch(`/api/workspace?action=read&path=${encodeURIComponent(path)}`)
                   .then(r => r.json())
                   .then(data => { if (!data.error) setFileContent(data.content || ""); });
               }
             }}
+          />
+        ) : (
+          <TasksPanel
+            tasks={taskStore.tasks}
+            onNavigate={handleNavigateToTask}
+            onDelete={taskStore.deleteTask}
+            onClearCompleted={taskStore.clearCompleted}
           />
         )}
       </main>

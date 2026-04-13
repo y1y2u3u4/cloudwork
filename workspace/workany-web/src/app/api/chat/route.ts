@@ -6,7 +6,7 @@ import { getWorkspaceRoot } from "@/lib/workspace";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { prompt, agent_id, file_context } = body;
+  const { prompt, agent_id, file_context, session_id } = body;
 
   if (!prompt) {
     return Response.json({ error: "prompt required" }, { status: 400 });
@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
   // Resolve agent config
   let cwd = getWorkspaceRoot();
   let model = "sonnet";
-  let systemPrompt = "";
+  let agentName = ""; // Claude Code --agent name
 
   if (agent_id) {
     const agent = getAgent(agent_id);
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
         cwd = path.resolve(getWorkspaceRoot(), agent.project_path);
       }
       model = agent.model || "sonnet";
-      systemPrompt = agent.system_prompt || "";
+      agentName = agent.source === "claude-code" ? agent.name : "";
     }
   }
 
@@ -36,30 +36,50 @@ export async function POST(req: NextRequest) {
   }
 
   // Build claude CLI command
-  const args = [
-    "-p", fullPrompt,
+  const args: string[] = [];
+
+  if (session_id) {
+    // Resume existing conversation
+    args.push("--resume", session_id, "-p", fullPrompt);
+  } else {
+    // New conversation
+    args.push("-p", fullPrompt);
+  }
+
+  args.push(
     "--model", model,
     "--output-format", "stream-json",
     "--verbose",
     "--dangerously-skip-permissions",
-  ];
+  );
 
-  if (systemPrompt) {
-    args.push("--system-prompt", systemPrompt);
+  // Use Claude Code's native --agent for registered agents
+  if (agentName && !session_id) {
+    args.push("--agent", agentName);
   }
 
   // Stream SSE response
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     start(controller) {
-      const proc = spawn("claude", args, {
+      const env = { ...process.env };
+      delete env.CLAUDECODE;
+      const proc = spawn("unbuffer", ["claude", ...args], {
         cwd,
-        env: { ...process.env },
+        env,
         stdio: ["pipe", "pipe", "pipe"],
       });
 
       let sessionId = "";
       let lineBuf = "";
+      let closed = false;
+
+      const safeEnqueue = (data: Uint8Array) => {
+        if (!closed) controller.enqueue(data);
+      };
+      const safeClose = () => {
+        if (!closed) { closed = true; controller.close(); }
+      };
 
       proc.stdout.on("data", (chunk: Buffer) => {
         lineBuf += chunk.toString("utf-8");
@@ -76,19 +96,21 @@ export async function POST(req: NextRequest) {
             const type = event.type;
 
             if (type === "system") {
-              sessionId = event.session_id || "";
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({ type: "session", sessionId })}\n\n`)
-              );
+              sessionId = event.session_id || sessionId;
+              if (event.session_id) {
+                safeEnqueue(
+                  encoder.encode(`data: ${JSON.stringify({ type: "session", sessionId: event.session_id })}\n\n`)
+                );
+              }
             } else if (type === "assistant") {
               const content = event.message?.content || [];
               for (const block of content) {
                 if (block.type === "text") {
-                  controller.enqueue(
+                  safeEnqueue(
                     encoder.encode(`data: ${JSON.stringify({ type: "text", content: block.text })}\n\n`)
                   );
                 } else if (block.type === "tool_use") {
-                  controller.enqueue(
+                  safeEnqueue(
                     encoder.encode(`data: ${JSON.stringify({ type: "tool_use", name: block.name, input: block.input })}\n\n`)
                   );
                 }
@@ -96,11 +118,11 @@ export async function POST(req: NextRequest) {
             } else if (type === "result") {
               // Emit the final result text so frontend can display it
               if (event.result) {
-                controller.enqueue(
+                safeEnqueue(
                   encoder.encode(`data: ${JSON.stringify({ type: "result_text", content: event.result })}\n\n`)
                 );
               }
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(`data: ${JSON.stringify({ type: "done", sessionId })}\n\n`)
               );
             }
@@ -120,14 +142,16 @@ export async function POST(req: NextRequest) {
           try {
             const event = JSON.parse(lineBuf.trim());
             if (event.type === "result") {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({ type: "text", content: event.result || "" })}\n\n`)
-              );
+              if (event.result) {
+                safeEnqueue(
+                  encoder.encode(`data: ${JSON.stringify({ type: "result_text", content: event.result })}\n\n`)
+                );
+              }
             } else if (event.type === "assistant") {
               const content = event.message?.content || [];
               for (const block of content) {
                 if (block.type === "text") {
-                  controller.enqueue(
+                  safeEnqueue(
                     encoder.encode(`data: ${JSON.stringify({ type: "text", content: block.text })}\n\n`)
                   );
                 }
@@ -135,17 +159,17 @@ export async function POST(req: NextRequest) {
             }
           } catch { /* skip */ }
         }
-        controller.enqueue(
+        safeEnqueue(
           encoder.encode(`data: ${JSON.stringify({ type: "done", sessionId })}\n\n`)
         );
-        controller.close();
+        safeClose();
       });
 
       proc.on("error", (err) => {
-        controller.enqueue(
+        safeEnqueue(
           encoder.encode(`data: ${JSON.stringify({ type: "error", message: err.message })}\n\n`)
         );
-        controller.close();
+        safeClose();
       });
     },
   });

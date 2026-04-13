@@ -14,6 +14,7 @@ export async function POST(req: NextRequest) {
       const agent = createAgent({
         name: body.name || "New Agent",
         icon: body.icon || "🤖",
+        description: body.description || "",
         project_path: body.project_path || "",
         model: body.model || "sonnet",
         system_prompt: body.system_prompt || "",
